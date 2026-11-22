@@ -111,23 +111,78 @@ Press `Ctrl + C` in the black command window (or just close it). Restart any tim
    an old balance.
 
 ### Printing tips
-- The receipt opens in a new browser tab and the print dialog appears by itself.
-- In the dialog choose your printer; **A4** is the default page size. For an 80 mm
-  thermal printer, choose that paper size (the receipt is a single narrow column).
-- If the dialog does not appear, press `Ctrl + P` on the receipt page, or use the
-  **Print receipt** button.
+- The receipt opens in a new browser tab and prints itself in **two jobs**: the
+  **Customer Copy** first, then — after you close the first dialog — the **Shop
+  Copy**. Closing the dialog between jobs is what lets the printer cut the paper.
+- The page is set up for an **80 mm roll** (`@page { size: 80mm auto }`), 72 mm of
+  printable width. Pick your thermal printer in the dialog and leave margins off.
+- Only the **Shop Copy** carries the customer signature line, and only when money
+  is still owed after the bill.
+- If the dialogs do not appear, press `Ctrl + P` — that prints both copies in a
+  single job with a tear line between them.
 
 ---
 
-## Backup and moving to another PC
-Everything is inside the `data` folder.
+## Backup, restore and moving to another PC
 
-- **Backup:** copy `data\shop.db` to a USB drive / cloud folder (do it while the app is
-  stopped, or just after a save).
-- **Move PC:** install Python on the new PC, copy the project folder including `data`,
-  run `run.bat`.
-- **Reset / start fresh:** stop the app, delete `data\shop.db`, start again — the 30 starter
-  products are re-created (customers and invoices are gone).
+The shop backs itself up — there is nothing to switch on.
+
+### Hourly snapshots in the `backups` folder
+- The live database is still `data\shop.db`.
+- A full copy is written to `backups\shop_YYYY-MM-DD_HH-MM.db`, for example
+  `backups\shop_2026-11-22_14-00.db`.
+- A snapshot is taken:
+  - when the app starts, **if** the newest one is more than an hour old,
+  - every hour while the app window stays open,
+  - right after a receipt or a due payment is saved (again, at most once an hour).
+- Copies are made with SQLite's own `.backup()` command, so a file is always a
+  complete, working database — never half-written, even while you keep billing.
+- **The newest 72 files are kept** (3 full days of hourly snapshots). Older ones are
+  deleted automatically, so the folder never fills the drive.
+- An existing file is never overwritten: a second copy in the same minute is saved as
+  `shop_2026-11-22_14-00-2.db`.
+
+The database itself runs in SQLite's **WAL** mode with `synchronous = FULL`, so a power
+cut or forced shutdown leaves it at the last good save instead of corrupting it. The
+hourly files in `backups` are the second line of defence.
+
+### Buttons in the top bar
+- **Download Backup (.db)** — makes a fresh snapshot immediately and saves it to your
+  Downloads folder. Use it before moving the PC, before reinstalling Windows, or to
+  copy the shop onto a USB stick.
+- **Export Customers & Dues (.csv)** — saves every customer with their Due and Credit
+  (`customers_dues_2026-11-22_14-00.csv`). It opens directly in Excel. This is a list
+  for reading, printing or archiving — it is not re-imported into the app.
+
+### Restoring an older backup
+If `data\shop.db` is ever lost, deleted or damaged:
+
+1. **Close the shop app** first (close the black command window, or press `Ctrl + C`).
+   Restoring while it is running will not work — the app keeps the file open.
+2. Open the `backups` folder in the project and pick the newest `shop_....db` from before
+   the loss. You can double-click it with SQLite/DB Browser to confirm the customers and
+   dues look right.
+3. Rename the broken `data\shop.db` to `data\shop.db.broken` (or delete it), so it cannot
+   be confused with the good copy. If `data\shop.db-wal` or `data\shop.db-shm` exist,
+   delete those too — they belong to the old file.
+4. **Copy** (do not move) the backup file into the `data` folder and rename it to
+   `shop.db`, so the path is exactly `data\shop.db`.
+5. Start the shop with `run.bat` and check the **Customers & Due** tab. The restored
+   database is a normal shop database — new bills, payments and hourly backups continue
+   from there.
+
+A snapshot is only as recent as its file name: everything saved **after** that time is not
+in it, so pick the newest one you have.
+
+### Moving to another PC / reset
+- **Move PC:** install Python on the new PC, copy the whole project folder — including
+  `data` (and `backups` if you want the history) — then run `run.bat`. Or move just the
+  newest backup file and restore it as above.
+- **Copy to a USB drive / cloud folder:** download a backup with the button, or copy any
+  file from the `backups` folder. Do this while the app is closed for the safest copy.
+- **Reset / start fresh:** stop the app, delete `data\shop.db` (and any `shop.db-wal` /
+  `shop.db-shm`), start again — the 30 starter products are re-created (customers and
+  invoices are gone). The files in `backups` are left alone.
 
 ---
 
@@ -136,7 +191,7 @@ Everything is inside the `data` folder.
 | What | Where |
 | --- | --- |
 | Shop name, address, phone on receipts | `app.py` → `SHOP = {...}` at the top |
-| Currency symbol (`Rs.` by default) | `app.py` → `CURRENCY = "Rs."` |
+| Currency symbol (`Tk.` by default) | `app.py` → `CURRENCY = "Tk."` |
 | Starter product list | `app.py` → `SEED_PRODUCTS` (only used when the database is empty) |
 | Colours / look | `static/css/style.css`, `static/css/receipt.css` |
 | Port (5000 by default) | set an environment variable `PORT`, e.g. `set PORT=8080` before `python app.py` |
@@ -161,7 +216,9 @@ static\
   css\style.css             App styling
   css\receipt.css           Receipt styling + @media print rules
   js\billing.js             Billing screen logic (search, totals, save & print)
-data\shop.db                Created automatically — your data (back this up)
+data\shop.db                Created automatically — your live data
+data\shop.db-wal / -shm     SQLite WAL files (normal; crash protection while running)
+backups\shop_*.db          Hourly snapshots, newest 72 kept — restore from here
 ```
 
 ---

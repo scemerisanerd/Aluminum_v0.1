@@ -54,6 +54,7 @@
               Paid {{ CURRENCY }} {{ s.cash_applied|money }}
               {% if s.credit_used > 0 %} • Credit used {{ CURRENCY }} {{ s.credit_used|money }}{% endif %}
               {% if s.scrap_total > 0 %} • Scrap {{ CURRENCY }} {{ s.scrap_total|money }}{% endif %}
+              {% if s.round_off > 0 %} • Round-off {{ CURRENCY }} {{ s.round_off|money }}{% endif %}
             </div>
           </div>
           <table class="data-table data-table-compact">
@@ -98,6 +99,12 @@
                 <td colspan="3" class="num">Cash paid on this invoice</td>
                 <td class="num">{{ CURRENCY }} {{ s.cash_applied|money }}</td>
               </tr>
+              {% if s.round_off > 0 %}
+              <tr>
+                <td colspan="3" class="num">Round-off / adjustment (waived)</td>
+                <td class="num">- {{ CURRENCY }} {{ s.round_off|money }}</td>
+              </tr>
+              {% endif %}
               <tr>
                 <td colspan="3" class="num"><b>Bill total (incl. previous due)</b></td>
                 <td class="num"><b>{{ CURRENCY }} {{ s.grand_total|money }}</b></td>

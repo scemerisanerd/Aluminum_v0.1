@@ -168,18 +168,23 @@ body.receipt-page {
     box-shadow: none;
   }
 
+  /* One copy per print job. The wrapper must never avoid page breaks, or a
+     long receipt is clipped instead of flowing down the roll. */
   .receipt-copy {
     width: 72mm;
     color: #000;
-    page-break-inside: avoid;
-    break-inside: avoid;
   }
 
-  /* Explicit page break: the shop copy always starts on its own piece of
-   * roll, so it can never be split by a cut. */
-  .receipt-copy--shop {
-    break-before: page;
-    page-break-before: always;
+  body.print-customer .receipt-copy--shop,
+  body.print-shop .receipt-copy--customer {
+    display: none !important;
+  }
+
+  /* In a single-copy job the tear line is not needed: the job ends and the
+     printer cuts. It still prints when both copies go out as one job. */
+  body.print-customer .tear-line,
+  body.print-shop .tear-line {
+    display: none !important;
   }
 
   .copy-banner { font-size: 9.5pt; margin: 0 0 2mm; }

@@ -5,12 +5,17 @@ Flask + SQLite. Fully offline: no CDN, no external services.
 Run:  python app.py      (then open http://127.0.0.1:5000)
 """
 
+import csv
+import io
 import os
 import sqlite3
+import threading
+import time
 from datetime import datetime
 
 from flask import (
     Flask,
+    Response,
     abort,
     flash,
     g,
@@ -18,12 +23,21 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     url_for,
 )
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "shop.db")
+# Timestamped snapshots live next to the data folder, never inside it, so a
+# backup copy can never be mistaken for the live database.
+BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+BACKUP_PREFIX = "shop_"
+BACKUP_STAMP = "%Y-%m-%d_%H-%M"
+BACKUP_EVERY_SECONDS = 60 * 60
+# 72 hourly snapshots = three full days of history.
+BACKUP_KEEP = 72
 
 # ---------------------------------------------------------------------------
 # Shop settings shown on the printed receipt. Edit these to your own shop.
@@ -34,7 +48,7 @@ SHOP = {
     "address": "12 Steel Market Road, Kadamtali, Dhaka",
     "phone": "01700-000000",
 }
-CURRENCY = "Rs."
+CURRENCY = "Tk."
 
 # Scrap aluminum accepted from customers as payment. Rates are per kg and can
 # be edited on the Products tab; they are stored in the scrap_rates table.
@@ -43,7 +57,8 @@ DEFAULT_SCRAP_RATES = (("Black", 190.00), ("White", 160.00))
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "local-pos-offline-key"
-app.config["JSON_SORT_KEYS"] = False
+# Flask 3 sorts JSON keys through app.json, not the old config key.
+app.json.sort_keys = False
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +95,9 @@ CREATE TABLE IF NOT EXISTS sales (
     scrap_black_rate REAL NOT NULL DEFAULT 0,
     scrap_white_rate REAL NOT NULL DEFAULT 0,
     scrap_total      REAL NOT NULL DEFAULT 0,
-    credit_used      REAL NOT NULL DEFAULT 0,
-    cash_applied     REAL NOT NULL DEFAULT 0
+        credit_used      REAL    NOT NULL DEFAULT 0,
+    cash_applied     REAL    NOT NULL DEFAULT 0,
+    round_off        REAL    NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS scrap_rates (
@@ -145,6 +161,12 @@ SALE_CREDIT_COLUMNS = (
     ("cash_applied", "REAL NOT NULL DEFAULT 0"),
 )
 
+# A small leftover the shop deliberately waives/rounds off. It settles that
+# part of the bill instead of being carried as customer due.
+SALE_ROUND_OFF_COLUMNS = (
+    ("round_off", "REAL NOT NULL DEFAULT 0"),
+)
+
 SEED_PRODUCTS = [
     # Sheets & Coils
     ("Aluminum Sheet 0.5 mm", "Sheets & Coils", 410.00),
@@ -185,12 +207,27 @@ SEED_PRODUCTS = [
 ]
 
 
+def connect_db(path=None):
+    """A connection set up so a power cut cannot corrupt the shop's data.
+
+    WAL writes changes to a separate log and checkpoints it into the main file,
+    so an interrupted commit leaves the database at its last good state instead
+    of a half-written page. synchronous=FULL makes each commit wait for the disk
+    to confirm the write before the sale is reported as saved.
+    """
+    con = sqlite3.connect(path or DB_PATH, timeout=10)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA synchronous = FULL")
+    con.execute("PRAGMA busy_timeout = 5000")
+    return con
+
+
 def get_db():
     if "db" not in g:
         os.makedirs(DATA_DIR, exist_ok=True)
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = connect_db()
     return g.db
 
 
@@ -203,7 +240,7 @@ def close_db(exc):
 
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
+    con = connect_db()
     con.executescript(SCHEMA)
     if con.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
         con.executemany(
@@ -214,7 +251,9 @@ def init_db():
     # Upgrade a database created before scrap/credit support without losing data.
     existing = {row[1] for row in con.execute("PRAGMA table_info(sales)")}
     added = set()
-    for name, declaration in SALE_SCRAP_COLUMNS + SALE_CREDIT_COLUMNS:
+    for name, declaration in (
+        SALE_SCRAP_COLUMNS + SALE_CREDIT_COLUMNS + SALE_ROUND_OFF_COLUMNS
+    ):
         if name not in existing:
             con.execute(f"ALTER TABLE sales ADD COLUMN {name} {declaration}")
             added.add(name)
@@ -232,6 +271,125 @@ def init_db():
     )
     con.commit()
     con.close()
+
+
+# ---------------------------------------------------------------------------
+# Backups: timestamped copies of the whole database, made with SQLite's own
+# .backup() so a copy is always a complete, consistent file - never a half
+# written one, even while the shop keeps billing.
+# ---------------------------------------------------------------------------
+BACKUP_LOCK = threading.Lock()
+
+
+def backup_files():
+    """Existing backup files, newest first."""
+    try:
+        names = [
+            name
+            for name in os.listdir(BACKUP_DIR)
+            if name.startswith(BACKUP_PREFIX) and name.endswith(".db")
+        ]
+    except OSError:
+        return []
+    # Newest first, by modification time (so two copies made in the same minute
+    # still sort in the order they were written).
+    entries = []
+    for name in names:
+        path = os.path.join(BACKUP_DIR, name)
+        try:
+            entries.append((os.path.getmtime(path), name, path))
+        except OSError:
+            continue
+    entries.sort(reverse=True)
+    return [path for _mtime, _name, path in entries]
+
+
+def newest_backup():
+    files = backup_files()
+    return files[0] if files else None
+
+
+def backup_is_due():
+    """True when there is no backup yet or the newest one is over an hour old."""
+    newest = newest_backup()
+    if newest is None:
+        return True
+    try:
+        return time.time() - os.path.getmtime(newest) >= BACKUP_EVERY_SECONDS
+    except OSError:
+        return True
+
+
+def prune_backups(keep=BACKUP_KEEP):
+    """Delete all but the newest `keep` snapshots so the disk never fills up."""
+    for path in backup_files()[keep:]:
+        try:
+            os.remove(path)
+        except OSError as exc:
+            print(f"Could not remove old backup {path}: {exc}")
+
+
+def create_backup(force=False):
+    """Write backups/shop_YYYY-MM-DD_HH-MM.db and return its path.
+
+    Returns None when nothing was written: the database does not exist yet, a
+    backup newer than an hour already exists (unless `force`), or the copy
+    failed. A failed backup never interrupts billing.
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+    with BACKUP_LOCK:
+        if not force and not backup_is_due():
+            return None
+        target = None
+        try:
+            os.makedirs(BACKUP_DIR, exist_ok=True)
+            stamp = datetime.now().strftime(BACKUP_STAMP)
+            target = os.path.join(BACKUP_DIR, f"{BACKUP_PREFIX}{stamp}.db")
+            # Never overwrite: a second copy in the same minute gets a suffix.
+            counter = 2
+            while os.path.exists(target):
+                target = os.path.join(
+                    BACKUP_DIR, f"{BACKUP_PREFIX}{stamp}-{counter}.db"
+                )
+                counter += 1
+
+            source = connect_db()
+            try:
+                dest = sqlite3.connect(target)
+                try:
+                    # SQLite's backup API copies page by page inside a read
+                    # transaction, so the copy is a consistent snapshot.
+                    source.backup(dest)
+                finally:
+                    dest.close()
+            finally:
+                source.close()
+        except (sqlite3.Error, OSError) as exc:
+            print(f"Backup failed: {exc}")
+            if target and os.path.exists(target):
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
+            return None
+
+        prune_backups()
+        return target
+
+
+def start_backup_thread():
+    """Keep taking hourly snapshots for as long as the shop is open."""
+
+    def worker():
+        while True:
+            time.sleep(60)
+            try:
+                create_backup()
+            except Exception as exc:  # never let a backup kill the thread
+                print(f"Backup error: {exc}")
+
+    threading.Thread(target=worker, name="hourly-backup", daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -254,17 +412,19 @@ app.jinja_env.globals["SHOP"] = SHOP
 # bill builds on this, so a new kind of payment only has to be added in one
 # place and no query can forget it.
 #
-# net = billed - cash kept at the till - scrap received
+# net = billed - cash kept at the till - scrap received - rounded-off leftovers
 #            - later cash payments - later scrap receipts
 #
 # Positive net is money owed; negative net is credit on the account. Cash paid
 # beyond a bill is change handed back, so `cash_applied` (not the tender) is
 # what counts. Scrap beyond a bill is never handed back, so it stays as credit
-# and comes off the next bill automatically.
+# and comes off the next bill automatically. A waived remainder is written off
+# on that bill, so it never shows up as due here.
 NET_BALANCE_SQL = (
     "(COALESCE((SELECT SUM(subtotal) FROM sales WHERE customer_id = {c}), 0)"
     " - COALESCE((SELECT SUM(cash_applied) FROM sales WHERE customer_id = {c}), 0)"
     " - COALESCE((SELECT SUM(scrap_total) FROM sales WHERE customer_id = {c}), 0)"
+    " - COALESCE((SELECT SUM(round_off) FROM sales WHERE customer_id = {c}), 0)"
     " - COALESCE((SELECT SUM(amount) FROM payments WHERE customer_id = {c}), 0)"
     " - COALESCE((SELECT SUM(total) FROM scrap_payments"
     "             WHERE customer_id = {c}), 0))"
@@ -341,22 +501,89 @@ def products():
     )
 
 
-@app.route("/customers")
-def customers():
-    """Tab 3: all customers with due balance."""
-    db = get_db()
-    rows = db.execute(
+def customers_with_balances(db):
+    """Every customer with their due/credit, biggest due first."""
+    return db.execute(
         "SELECT t.*, MAX(0.0, t.net) AS balance, MAX(0.0, -t.net) AS credit"
         " FROM ("
         f"SELECT c.*, {account_sql('c.id')} AS net FROM customers c"
         ") AS t ORDER BY balance DESC, t.name COLLATE NOCASE"
     ).fetchall()
+
+
+@app.route("/customers")
+def customers():
+    """Tab 3: all customers with due balance."""
+    db = get_db()
+    rows = customers_with_balances(db)
     total_due = round(sum(r["balance"] for r in rows), 2)
     return render_template(
         "customers.html",
         active="customers",
         customers=rows,
         total_due=total_due,
+    )
+
+
+@app.route("/daily")
+def daily_summary():
+    """Tab 4: what was sold on one day, ranked by weight or by revenue."""
+    db = get_db()
+    now = datetime.now()
+    today_iso = now.strftime("%Y-%m-%d")
+
+    # Any past day can be reviewed; a missing or malformed date falls back to
+    # today instead of showing an error page.
+    requested = (request.args.get("date") or "").strip()
+    day = now.date()
+    if requested:
+        try:
+            day = datetime.strptime(requested, "%Y-%m-%d").date()
+        except ValueError:
+            day = now.date()
+    day_iso = day.strftime("%Y-%m-%d")
+    sort = "revenue" if request.args.get("sort") == "revenue" else "weight"
+
+    totals = db.execute(
+        "SELECT COUNT(*) AS receipts,"
+        " COALESCE(SUM(subtotal), 0) AS sales,"
+        " COALESCE(SUM(cash_applied), 0) AS cash,"
+        " COALESCE(SUM(new_due), 0) AS due,"
+        " COALESCE(SUM(scrap_total), 0) AS scrap"
+        " FROM sales WHERE date(created_at) = ?",
+        (day_iso,),
+    ).fetchone()
+
+    # One row per product name (the name is snapshotted on each line, so a
+    # deleted product still shows up in its own past sales). `sort` is chosen
+    # from a fixed pair above, never taken from the URL as raw SQL.
+    order_column = "revenue" if sort == "revenue" else "weight"
+    products = db.execute(
+        "SELECT si.product_name,"
+        " SUM(si.weight_kg) AS weight,"
+        " SUM(si.line_total) AS revenue,"
+        " COUNT(DISTINCT si.sale_id) AS orders"
+        " FROM sale_items si JOIN sales s ON s.id = si.sale_id"
+        " WHERE date(s.created_at) = ?"
+        " GROUP BY si.product_name"
+        f" ORDER BY {order_column} DESC, si.product_name COLLATE NOCASE",
+        (day_iso,),
+    ).fetchall()
+
+    total_weight = round(sum(p["weight"] for p in products), 3)
+    avg_bill = round(totals["sales"] / totals["receipts"], 2) if totals["receipts"] else 0.0
+    return render_template(
+        "daily.html",
+        active="daily",
+        day_iso=day_iso,
+        day_label=day.strftime("%A, %d %b %Y"),
+        today_iso=today_iso,
+        sort=sort,
+        totals=totals,
+        products=products,
+        total_weight=total_weight,
+        avg_bill=avg_bill,
+        printed_at=now.strftime("%d %b %Y, %I:%M %p"),
     )
 
 
@@ -408,8 +635,60 @@ def customer_detail(customer_id):
         total_billed=sum(s["subtotal"] for s in sales),
         total_paid=sum(s["cash_applied"] for s in sales)
         + sum(s["scrap_total"] for s in sales)
+        + sum(s["round_off"] for s in sales)
         + sum(p["amount"] for p in payments)
         + sum(e["total"] for e in scrap_entries),
+    )
+
+
+@app.get("/backup/download")
+def download_backup():
+    """One-click copy of the whole database, downloaded to this PC."""
+    if not os.path.exists(DB_PATH):
+        note("There is no database to back up yet.", "error")
+        return redirect(url_for("billing"))
+    path = create_backup(force=True)
+    if not path:
+        note("Could not create the backup file. Check the console for details.", "error")
+        return redirect(url_for("billing"))
+    return send_file(
+        path,
+        as_attachment=True,
+        download_name=os.path.basename(path),
+        mimetype="application/x-sqlite3",
+    )
+
+
+@app.get("/export/customers.csv")
+def export_customers_csv():
+    """Customer due list as a spreadsheet (opens in Excel / LibreOffice)."""
+    db = get_db()
+    rows = customers_with_balances(db)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(
+        ["Customer ID", "Name", "Shop", "Phone", "Address", "Due", "Credit"]
+    )
+    for row in rows:
+        writer.writerow(
+            [
+                row["id"],
+                row["name"],
+                row["shop_name"] or "",
+                row["phone"] or "",
+                row["address"] or "",
+                f"{row['balance']:.2f}",
+                f"{row['credit']:.2f}",
+            ]
+        )
+    filename = (
+        "customers_dues_" + datetime.now().strftime(BACKUP_STAMP) + ".csv"
+    )
+    # The BOM makes Excel read the file as UTF-8 instead of mangling names.
+    return Response(
+        "\ufeff" + out.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -605,6 +884,8 @@ def record_payment(customer_id):
     if change > 0:
         message += f" {CURRENCY} {money(change)} was change handed back."
     note(message)
+    # A payment changes due balances: snapshot it if the hour is up.
+    create_backup()
     return redirect(url_for("customer_detail", customer_id=customer_id))
 
 
@@ -665,6 +946,7 @@ def record_scrap_payment(customer_id):
     else:
         message += f"Remaining due: {CURRENCY} {money(account['due'])}."
     note(message)
+    create_backup()
     return redirect(url_for("customer_detail", customer_id=customer_id))
 
 
@@ -758,6 +1040,12 @@ def api_create_sale():
         paid = round(float(payload.get("paid") or 0), 2)
     except (TypeError, ValueError):
         return jsonify({"error": "Amount paid must be a number."}), 400
+    try:
+        requested_round_off = round(float(payload.get("round_off") or 0), 2)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Round-off amount must be a number."}), 400
+    if requested_round_off < 0:
+        return jsonify({"error": "Round-off amount cannot be negative."}), 400
 
     if not customer_id:
         return jsonify({"error": "Select or create a customer first."}), 400
@@ -833,7 +1121,11 @@ def api_create_sale():
     # Cash above the amount needed is change handed back, never credit.
     cash_applied = round(min(paid, cash_needed), 2)
     change = round(paid - cash_applied, 2)
-    new_due = round(cash_needed - cash_applied, 2)
+    remainder = round(cash_needed - cash_applied, 2)
+    # A small leftover the shop chooses to waive is settled on this bill: it is
+    # never allowed to exceed the real remainder and never becomes customer due.
+    round_off = round(min(requested_round_off, remainder), 2)
+    new_due = round(remainder - round_off, 2)
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
@@ -842,12 +1134,12 @@ def api_create_sale():
             "INSERT INTO sales (customer_id, subtotal, previous_due, grand_total,"
             " paid, new_due, created_at, scrap_black_kg, scrap_white_kg,"
             " scrap_black_rate, scrap_white_rate, scrap_total,"
-            " credit_used, cash_applied)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " credit_used, cash_applied, round_off)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (customer_id, subtotal, previous_due, grand_total, paid, new_due,
              created_at, scrap["Black"]["kg"], scrap["White"]["kg"],
              scrap["Black"]["rate"], scrap["White"]["rate"], scrap_total,
-             credit_used, cash_applied),
+             credit_used, cash_applied, round_off),
         )
         sale_id = cur.lastrowid
         db.executemany(
@@ -870,6 +1162,9 @@ def api_create_sale():
         db.rollback()
         return jsonify({"error": f"Could not save the sale: {exc}"}), 500
 
+    # Snapshot right after a receipt is saved, at most once an hour.
+    create_backup()
+
     return (
         jsonify(
             {
@@ -881,6 +1176,8 @@ def api_create_sale():
                 "paid": paid,
                 "scrap_total": scrap_total,
                 "new_due": new_due,
+                "remainder": remainder,
+                "round_off": round_off,
                 "credit_used": credit_used,
                 "cash_applied": cash_applied,
                 "scrap_credit": scrap_credit,
@@ -902,9 +1199,30 @@ def not_found(_error):
 # ---------------------------------------------------------------------------
 # Start-up
 # ---------------------------------------------------------------------------
+def start_option(variable, default):
+    """Read an override from the environment, ignoring junk or empty values."""
+    return (os.environ.get(variable) or "").strip() or default
+
+
 if __name__ == "__main__":
     init_db()
-    port = int(os.environ.get("PORT", "5000"))
+    # One snapshot on start-up (if the last one is over an hour old), then a
+    # fresh one every hour while the shop window stays open.
+    start_backup = create_backup()
+    start_backup_thread()
+    port_text = start_option("POS_PORT", start_option("PORT", "5000"))
+    try:
+        port = int(port_text)
+    except ValueError:
+        port = 5000
+    if not 1 <= port <= 65535:
+        port = 5000
+    # Loopback only: this shop has no login, so it must not be reachable from
+    # the local network. Set POS_HOST=0.0.0.0 to share it deliberately.
+    host = start_option("POS_HOST", "127.0.0.1")
     print(f"Database: {DB_PATH}")
-    print(f"Shop POS running at http://127.0.0.1:{port}  (Ctrl+C to stop)")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    print(f"Backups : {BACKUP_DIR}  (hourly, newest {BACKUP_KEEP} kept)")
+    if start_backup:
+        print(f"Backup  : {os.path.basename(start_backup)}")
+    print(f"Shop POS running at http://{host}:{port}  (Ctrl+C to stop)")
+    app.run(host=host, port=port, debug=False)

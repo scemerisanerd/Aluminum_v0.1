@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block body_class %}daily-page{% endblock %}
+{% block title %}Daily Sales — {{ day_label }}{% endblock %}
+
+{% block content %}
+<div class="daily-print-head print-only">
+  <h1>{{ SHOP.name }}</h1>
+  <p>Daily Sales Summary — {{ day_label }}</p>
+</div>
+
+<section class="page-head">
+  <div>
+    <h2>Daily Sales</h2>
+    <p class="muted daily-sub">{{ day_label }} — weight and revenue for every product sold that day.</p>
+  </div>
+  <form class="date-form no-print" method="get" action="{{ url_for('daily_summary') }}">
+    <input type="hidden" name="sort" value="{{ sort }}">
+    <label for="daily-date">Report date
+      <input type="date" id="daily-date" name="date" value="{{ day_iso }}"
+             max="{{ today_iso }}" onchange="this.form.submit()">
+    </label>
+    <button type="submit" class="btn btn-small">Show</button>
+    {% if day_iso != today_iso %}
+      <a class="btn btn-small btn-ghost" href="{{ url_for('daily_summary', sort=sort) }}">Today</a>
+    {% endif %}
+    <button type="button" class="btn btn-primary" onclick="window.print()">Print Daily Report</button>
+  </form>
+</section>
+
+<section class="summary-row daily-cards">
+  <div class="mini-stat">
+    <span>Total aluminum sold</span>
+    <b>{{ '%.3f'|format(total_weight) }} kg</b>
+    <em class="daily-note">
+      {{ products|length }} product{{ '' if products|length == 1 else 's' }} sold
+    </em>
+  </div>
+  <div class="mini-stat">
+    <span>Total sales value</span>
+    <b>{{ CURRENCY }} {{ totals.sales|money }}</b>
+    <div class="daily-breakdown">
+      <div><span>Cash collected</span><b>{{ CURRENCY }} {{ totals.cash|money }}</b></div>
+      <div><span>New due</span><b>{{ CURRENCY }} {{ totals.due|money }}</b></div>
+      {% if totals.scrap > 0 %}
+      <div><span>Scrap received</span><b>{{ CURRENCY }} {{ totals.scrap|money }}</b></div>
+      {% endif %}
+    </div>
+  </div>
+  <div class="mini-stat">
+    <span>Receipts / orders</span>
+    <b>{{ totals.receipts }}</b>
+    <em class="daily-note">
+      {% if totals.receipts %}
+        Average bill {{ CURRENCY }} {{ avg_bill|money }}
+      {% else %}
+        No receipts this day
+      {% endif %}
+    </em>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h3>Product sales — most to least sold</h3>
+    <div class="sort-toggle no-print">
+      <span class="small muted">Sort by</span>
+      <a class="sort-chip {{ 'is-active' if sort == 'weight' }}"
+         href="{{ url_for('daily_summary', date=day_iso, sort='weight') }}">Weight sold</a>
+      <a class="sort-chip {{ 'is-active' if sort == 'revenue' }}"
+         href="{{ url_for('daily_summary', date=day_iso, sort='revenue') }}">Revenue</a>
+    </div>
+  </div>
+
+  {% if products %}
+  <table class="data-table daily-table">
+    <thead>
+      <tr>
+        <th class="rank-col">Rank</th>
+        <th>Product</th>
+        <th class="num">Weight sold (kg)</th>
+        <th class="num">Revenue ({{ CURRENCY }})</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in products %}
+      <tr>
+        <td class="rank-col"><span class="rank-badge">#{{ loop.index }}</span></td>
+        <td class="link-strong">{{ p.product_name }}</td>
+        <td class="num">{{ '%.3f'|format(p.weight) }}</td>
+        <td class="num">{{ p.revenue|money }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="2">Total — {{ products|length }} product{{ '' if products|length == 1 else 's' }}</td>
+        <td class="num">{{ '%.3f'|format(total_weight) }}</td>
+        <td class="num">{{ totals.sales|money }}</td>
+      </tr>
+    </tfoot>
+  </table>
+  {% else %}
+    <p class="empty">No sales recorded on {{ day_label }}.</p>
+  {% endif %}
+</section>
+
+<p class="daily-print-foot print-only">
+  Printed {{ printed_at }} &nbsp;•&nbsp; {{ totals.receipts }} receipt{{ '' if totals.receipts == 1 else 's' }}
+</p>
+{% endblock %}

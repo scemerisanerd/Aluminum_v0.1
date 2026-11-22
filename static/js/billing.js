@@ -3,8 +3,13 @@
 (function () {
   "use strict";
 
-  const CURRENCY = document.body.dataset.currency || "Rs.";
-  const state = { products: [], customer: null, scrapRates: {} };
+  const CURRENCY = document.body.dataset.currency || "Tk.";
+  const state = {
+    products: [],
+    customer: null,
+    scrapRates: {},
+    roundOff: 0,
+  };
 
   const el = {
     search: document.getElementById("customer-search"),
@@ -27,6 +32,11 @@
     scrapCreditRow: document.getElementById("scrap-credit-row"),
     scrapCredit: document.getElementById("scrap-credit"),
     paid: document.getElementById("paid"),
+    remainder: document.getElementById("remainder"),
+    waive: document.getElementById("waive-remainder"),
+    waiveAmount: document.getElementById("waive-amount"),
+    waiveThreshold: document.getElementById("waive-threshold"),
+    waiveHint: document.getElementById("waive-hint"),
     newDue: document.getElementById("new-due"),
     changeNote: document.getElementById("change-note"),
     scrapBlack: document.getElementById("scrap-black"),
@@ -194,6 +204,46 @@
     }
   }
 
+  /* ---------------- round-off ---------------- */
+  const THRESHOLD_KEY = "pos.roundoff.threshold";
+
+  function thresholdValue() {
+    var limit = parseFloat(el.waiveThreshold.value);
+    return isNaN(limit) || limit < 0 ? 0 : round2(limit);
+  }
+
+  /* What gets waived on this bill, never more than the real remainder. Nothing
+     is ever waived unless the shop ticked the box itself. */
+  function waiveFor(remainder) {
+    if (!el.waive || !el.waive.checked || remainder <= 0) return 0;
+    var typed = parseFloat(el.waiveAmount.value);
+    // Empty or 0 means "the whole remainder"; a negative entry is ignored.
+    if (isNaN(typed) || typed === 0) return round2(remainder);
+    if (typed < 0) return 0;
+    return round2(Math.min(typed, remainder));
+  }
+
+  function renderWaive(remainder, waived) {
+    var limit = thresholdValue();
+
+    if (remainder <= 0) {
+      el.waiveHint.textContent = "Nothing left to pay, so there is no remainder to waive.";
+    } else if (waived > 0) {
+      el.waiveHint.textContent =
+        "Waived " + CURRENCY + " " + money(waived) +
+        " — settled here, not added to the customer's due." +
+        (remainder > limit ? " Above the suggestion limit (manual round-off)." : "");
+    } else if (remainder <= limit) {
+      el.waiveHint.textContent =
+        "This " + CURRENCY + " " + money(remainder) + " remainder is under " +
+        CURRENCY + " " + money(limit) +
+        ". Tick “Waive / Round Off Remainder” to write it off instead of adding it to due.";
+    } else {
+      el.waiveHint.textContent =
+        "Remainder stays on the customer's due balance. Tick the box above to waive it by hand.";
+    }
+  }
+
   function recalcTotals() {
     let bill = 0;
     el.itemsBody.querySelectorAll("tr").forEach((tr) => {
@@ -219,11 +269,20 @@
     const remaining = round2(cashNeeded - cashApplied);
     const change = round2(paid - cashApplied);
 
+    // Round-off is opt-in: a small remainder is only suggested in the hint, and
+    // the due stays untouched until the shop ticks the box.
+    const waived = waiveFor(remaining);
+    const dueNow = round2(remaining - waived);
+    state.roundOff = waived;
+
     el.billTotal.textContent = CURRENCY + " " + money(bill);
     el.prevDue.textContent = CURRENCY + " " + money(previous);
     el.grandTotal.textContent = CURRENCY + " " + money(grand);
     if (el.creditUsed) el.creditUsed.textContent = CURRENCY + " " + money(creditUsed);
-    el.newDue.textContent = CURRENCY + " " + money(remaining);
+    if (el.remainder) el.remainder.textContent = CURRENCY + " " + money(remaining);
+    el.newDue.textContent = CURRENCY + " " + money(dueNow);
+    if (el.waiveAmount) el.waiveAmount.max = String(remaining);
+    renderWaive(remaining, waived);
 
     if (el.scrapCreditRow) {
       el.scrapCreditRow.hidden = scrapCredit <= 0;
@@ -414,6 +473,10 @@
       }
     }
 
+    // Recompute so a waived remainder always matches what is on screen.
+    recalcTotals();
+    const roundOff = state.roundOff || 0;
+
     el.savePrint.disabled = true;
     setStatus("Saving…");
     // Opened during the click so pop-up blockers allow the receipt tab.
@@ -427,6 +490,7 @@
           items: items,
           scrap: scrap,
           paid: paid,
+          round_off: roundOff,
         }),
       });
       const data = await res.json();
@@ -438,7 +502,10 @@
         setStatus(
           "Saved. Receipt " +
             data.receipt_url.split("/").pop().padStart(5, "0") +
-            " opened for printing."
+            " opened for printing." +
+            (data.round_off > 0
+              ? " " + CURRENCY + " " + money(data.round_off) + " rounded off."
+              : "")
         );
       } else {
         el.status.innerHTML = "";
@@ -463,6 +530,8 @@
     el.paid.value = "0.00";
     el.scrapBlack.value = "";
     el.scrapWhite.value = "";
+    el.waive.checked = false;
+    el.waiveAmount.value = "";
     clearCustomer();
   }
 
@@ -565,6 +634,18 @@
   el.paid.addEventListener("input", recalcTotals);
   el.scrapBlack.addEventListener("input", recalcTotals);
   el.scrapWhite.addEventListener("input", recalcTotals);
+  el.waive.addEventListener("change", () => {
+    // Unticking clears any typed amount, so ticking again starts from the whole
+    // remainder and can never leave a stale waived figure behind.
+    if (!el.waive.checked) el.waiveAmount.value = "";
+    recalcTotals();
+  });
+  el.waiveAmount.addEventListener("input", recalcTotals);
+  el.waiveThreshold.addEventListener("input", () => {
+    var limit = thresholdValue();
+    try { localStorage.setItem(THRESHOLD_KEY, String(limit)); } catch (err) {}
+    recalcTotals();
+  });
   el.savePrint.addEventListener("click", saveSale);
 
   /* ---------------- start ---------------- */
@@ -576,6 +657,12 @@
     } catch (err) {
       setStatus("Could not load products. Is the server running?", true);
     }
+    try {
+      var savedLimit = localStorage.getItem(THRESHOLD_KEY);
+      if (savedLimit !== null && !isNaN(parseFloat(savedLimit))) {
+        el.waiveThreshold.value = String(parseFloat(savedLimit));
+      }
+    } catch (err) {}
     await loadScrapRates();
     addRow();
     recalcTotals();

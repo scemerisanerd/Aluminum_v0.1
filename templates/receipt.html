@@ -19,6 +19,7 @@
   {# Scrap above the bill is not change; it stays on the account as credit. #}
   {% set scrap_credit = [scrap_display - [sale.grand_total, 0]|max, 0]|max %}
   {% set change_display = [sale.paid - cash_applied, 0]|max %}
+  {% set round_off = [sale.round_off, 0]|max %}
   <section class="receipt-copy {{ extra_class }}">
     <div class="copy-banner">{{ copy_label }}</div>
 
@@ -112,6 +113,12 @@
         <td>Amount paid today (cash)</td>
         <td class="num">{{ CURRENCY }} {{ cash_applied|money }}</td>
       </tr>
+      {% if round_off > 0 %}
+      <tr>
+        <td>Round-off / Adj.</td>
+        <td class="num">- {{ CURRENCY }} {{ round_off|money }}</td>
+      </tr>
+      {% endif %}
       <tr class="row-due">
         <td>Remaining due</td>
         <td class="num">{{ CURRENCY }} {{ due_display|money }}</td>
@@ -149,7 +156,7 @@
   </div>
 
   <div class="receipt-sheet">
-    {{ receipt_body('*** CUSTOMER COPY ***', False) }}
+    {{ receipt_body('*** CUSTOMER COPY ***', False, 'receipt-copy--customer') }}
 
     <div class="tear-line" aria-hidden="true">- - - - - - - - - - - - - - - -</div>
 
@@ -158,9 +165,41 @@
 
   {% if autoprint %}
   <script>
-    window.addEventListener('load', function () {
-      setTimeout(function () { window.print(); }, 250);
-    });
+    /* Two sequential print jobs, so the printer can cut between the copies:
+       job 1 prints only the customer copy, closing the dialog sends job 2
+       with only the shop copy. */
+    (function () {
+      var stages = ['print-customer', 'print-shop'];
+      var pass = 0;
+
+      function clearStages() {
+        stages.forEach(function (name) {
+          document.body.classList.remove(name);
+        });
+      }
+
+      function nextPass() {
+        if (pass >= stages.length) {
+          clearStages();
+          pass = 0;
+          return;
+        }
+        clearStages();
+        document.body.classList.add(stages[pass]);
+        pass += 1;
+        // Let the browser apply the class before the dialog is built.
+        setTimeout(function () { window.print(); }, 60);
+      }
+
+      window.addEventListener('afterprint', function () {
+        if (!pass) return;
+        setTimeout(nextPass, 600);
+      });
+
+      window.addEventListener('load', function () {
+        setTimeout(nextPass, 250);
+      });
+    })();
   </script>
   {% endif %}
 </body>

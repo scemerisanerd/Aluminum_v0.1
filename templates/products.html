@@ -40,7 +40,7 @@
           </td>
           <td class="actions">
             <form method="post" action="{{ url_for('delete_product', product_id=p.id) }}"
-                  onsubmit="return confirm('Remove {{ p.name }}? Past invoices are not affected.');">
+                  onsubmit="return confirm('Remove ' + {{ p.name|tojson }} + '? Past invoices are not affected.');">
               <button type="submit" class="btn btn-small btn-ghost btn-danger" title="Remove product">✕</button>
             </form>
           </td>

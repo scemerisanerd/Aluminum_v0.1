@@ -60,6 +60,14 @@ a:hover { text-decoration: underline; }
 .tab:hover { background: rgba(255,255,255,.07); text-decoration: none; }
 .tab.is-active { background: var(--bg); color: var(--ink); }
 
+/* Backup / export buttons in the header -------------------------- */
+.data-tools { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 10px; }
+.tab-data {
+  color: #d7e4f1; border: 1px solid rgba(255,255,255,.22); border-radius: 8px;
+  padding: 7px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap;
+}
+.tab-data:hover { background: rgba(255,255,255,.1); text-decoration: none; }
+
 /* Layout ---------------------------------------------------------- */
 .app-main { max-width: 1280px; margin: 0 auto; padding: 22px 24px 40px; }
 .app-footer {
@@ -219,6 +227,15 @@ kbd {
 .scrap-table input { width: 112px; }
 .scrap-table .scrap-rate { color: var(--ink-soft); }
 .paid-field { margin: 10px 0 6px; font-weight: 600; }
+.remainder-row { background: #fff8e6; border-radius: 7px; padding: 9px 10px; }
+.roundoff-box {
+  margin: 8px 0; padding: 10px 12px; border-radius: 9px;
+  border: 1px dashed #d9c98a; background: #fffdf3;
+}
+.checkline { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.checkline input { width: 16px; height: 16px; }
+.roundoff-fields { grid-template-columns: 1fr 1fr; margin-top: 8px; gap: 8px; }
+.roundoff-box .small { margin: 6px 0 0; }
 .new-due {
   margin-top: 6px; padding: 13px 14px; border-radius: 9px; border: 0;
   background: #fdf1f2; color: #7c1b24;
@@ -264,6 +281,118 @@ kbd {
   .form-grid { grid-template-columns: 1fr; }
 }
 
+/* Daily sales ----------------------------------------------------- */
+.date-form { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.date-form .btn { margin-bottom: 1px; }
+.date-form input[type="date"] {
+  display: block; margin-top: 5px; padding: 8px 11px; font: inherit; font-weight: 600;
+  color: var(--ink); background: #fbfcfd; border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.date-form input[type="date"]:focus {
+  outline: 2px solid rgba(31, 111, 235, .25); border-color: var(--brand); background: #fff;
+}
+.daily-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.daily-cards .mini-stat b { display: block; font-size: 22px; margin-top: 2px; }
+.daily-note {
+  display: block; margin-top: 4px; font-size: 12px; font-style: normal;
+  color: var(--ink-soft); font-weight: 400;
+}
+.daily-breakdown {
+  margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--line);
+  display: grid; gap: 2px; font-size: 12.5px;
+}
+.daily-breakdown div { display: flex; justify-content: space-between; gap: 8px; }
+.daily-breakdown span { color: var(--ink-soft); }
+.daily-breakdown b { font-variant-numeric: tabular-nums; }
+.sort-toggle { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sort-chip {
+  border: 1px solid var(--line); background: #fff; border-radius: 999px;
+  padding: 5px 12px; font-size: 12.5px; font-weight: 600; color: var(--ink-soft);
+}
+.sort-chip:hover { text-decoration: none; background: #f2f6fa; }
+.sort-chip.is-active { background: var(--brand); border-color: var(--brand); color: #fff; }
+.rank-col { width: 1%; white-space: nowrap; }
+.rank-badge {
+  display: inline-grid; place-items: center; min-width: 26px; height: 26px;
+  padding: 0 6px; border-radius: 999px; background: #eef3f8; color: var(--steel);
+  font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.daily-table tbody tr:first-child .rank-badge { background: #fff4e5; color: #8a5a00; }
+.print-only { display: none; }
+.daily-print-head { text-align: center; }
+.daily-print-head h1 { margin: 0; font-size: 13pt; letter-spacing: .04em; }
+.daily-print-head p { margin: 0; font-size: 8.5pt; }
+
+@media (max-width: 980px) {
+  .daily-cards { grid-template-columns: 1fr; }
+}
+
 @media print {
   .no-print { display: none !important; }
+}
+
+/* Daily report on an 80mm thermal roll, single end-of-day slip ----- */
+@media print {
+  @page { size: 80mm auto; margin: 0mm; }
+
+  html, body { margin: 0; padding: 0; background: #fff; }
+
+  body.daily-page {
+    width: 80mm;
+    font-size: 9pt;
+    color: #000;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  body.daily-page .app-main { max-width: none; margin: 0; padding: 3mm 2mm; }
+  body.daily-page .page-head,
+  body.daily-page .app-footer { display: none !important; }
+
+  .print-only { display: block; }
+  .daily-print-head { margin: 0 0 2mm; }
+
+  .daily-cards { display: block; margin: 0 0 3mm; }
+  body.daily-page .mini-stat {
+    display: flex; flex-wrap: wrap; justify-content: space-between;
+    gap: 1mm 4mm; background: none; border: 0; border-bottom: 1px dotted #000;
+    border-radius: 0; box-shadow: none; padding: 1.5mm 0;
+  }
+  body.daily-page .mini-stat span { font-size: 7.5pt; letter-spacing: .04em; }
+  body.daily-page .mini-stat b { font-size: 11pt; margin: 0; }
+  body.daily-page .daily-note { width: 100%; margin: 0; font-size: 7.5pt; }
+  body.daily-page .daily-breakdown {
+    width: 100%; margin: 1mm 0 0; padding: 0; border: 0; font-size: 8pt;
+  }
+  body.daily-page .daily-breakdown div { display: flex; justify-content: space-between; }
+
+  body.daily-page .card {
+    background: none; border: 0; border-radius: 0; box-shadow: none;
+    padding: 0; margin: 0;
+  }
+  body.daily-page .card-head { margin: 0 0 1mm; }
+  body.daily-page .card-head h3 {
+    font-size: 9pt; text-transform: uppercase; letter-spacing: .05em;
+  }
+
+  body.daily-page .data-table { font-size: 8.5pt; }
+  body.daily-page .data-table th {
+    font-size: 7pt; padding: 1mm; border-bottom: 1px solid #000;
+  }
+  body.daily-page .data-table td { padding: 1mm; border-bottom: 1px dotted #000; }
+  body.daily-page .data-table tfoot td {
+    background: none; border-top: 1px solid #000; font-weight: 700;
+  }
+  body.daily-page .rank-badge {
+    background: none; color: #000; min-width: 0; height: auto; padding: 0;
+    font-size: 8.5pt;
+  }
+  body.daily-page .daily-table tbody tr:first-child .rank-badge {
+    background: none; color: #000;
+  }
+  body.daily-page .data-table tbody tr:hover { background: none; }
+  body.daily-page .empty { font-size: 8.5pt; padding: 2mm 0; }
+  body.daily-page .daily-print-foot {
+    text-align: center; font-size: 7.5pt; margin: 3mm 0 0;
+  }
 }

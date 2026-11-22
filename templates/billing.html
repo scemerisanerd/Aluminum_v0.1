@@ -160,6 +160,30 @@
         Amount paid today ({{ CURRENCY }})
         <input class="input input-lg" type="number" id="paid" step="0.01" min="0" value="0.00">
       </label>
+      <div class="total-row remainder-row">
+        <span>Remainder / Difference</span>
+        <b id="remainder">{{ CURRENCY }} 0.00</b>
+      </div>
+
+      <div class="roundoff-box" id="roundoff-box">
+        <label class="checkline">
+          <input type="checkbox" id="waive-remainder">
+          <span>Waive / Round Off Remainder</span>
+        </label>
+        <div class="form-grid roundoff-fields">
+          <label>
+            Round-off / Waived amount ({{ CURRENCY }})
+            <input class="input" type="number" id="waive-amount" step="0.01" min="0"
+                   placeholder="whole remainder">
+          </label>
+          <label>
+            Suggest under ({{ CURRENCY }})
+            <input class="input" type="number" id="waive-threshold" step="1" min="0" value="10">
+          </label>
+        </div>
+        <p class="small muted" id="waive-hint">Small remainders are only suggested — nothing is waived until you tick the box.</p>
+      </div>
+
       <div class="total-row new-due">
         <span>New remaining due</span>
         <b id="new-due">{{ CURRENCY }} 0.00</b>

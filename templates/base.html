@@ -6,7 +6,7 @@
   <title>{% block title %}Aluminum Wholesale POS{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
-<body data-currency="{{ CURRENCY }}">
+<body class="{% block body_class %}{% endblock %}" data-currency="{{ CURRENCY }}">
   <header class="app-header no-print">
     <div class="brand">
       <span class="brand-mark">Al</span>
@@ -18,8 +18,15 @@
     <nav class="tabs">
       <a href="{{ url_for('billing') }}" class="tab {{ 'is-active' if active == 'billing' }}">New Receipt</a>
       <a href="{{ url_for('products') }}" class="tab {{ 'is-active' if active == 'products' }}">Products</a>
+      <a href="{{ url_for('daily_summary') }}" class="tab {{ 'is-active' if active == 'daily' }}">Daily Sales</a>
       <a href="{{ url_for('customers') }}" class="tab {{ 'is-active' if active == 'customers' }}">Customers &amp; Due</a>
     </nav>
+    <div class="data-tools">
+      <a href="{{ url_for('download_backup') }}" class="tab-data"
+         title="Save a timestamped copy of data/shop.db to your Downloads folder">Download Backup (.db)</a>
+      <a href="{{ url_for('export_customers_csv') }}" class="tab-data"
+         title="Customer due list as a spreadsheet file">Export Customers &amp; Dues (.csv)</a>
+    </div>
   </header>
 
   <main class="app-main">
@@ -37,6 +44,7 @@
 
   <footer class="app-footer no-print">
     Offline POS &amp; Due Ledger &nbsp;•&nbsp; {{ today }} &nbsp;•&nbsp; Data saved locally in <code>data/shop.db</code>
+    and backed up hourly in <code>backups/</code>
   </footer>
   {% block scripts %}{% endblock %}
 </body>
