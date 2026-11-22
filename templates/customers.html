@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Customers &amp; Due{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <h2>Customers &amp; Due</h2>
+    <p class="muted">Click a customer to see every purchase and record a due payment or scrap received.</p>
+  </div>
+  <div class="stat-chip stat-chip-strong">
+    <span>{{ CURRENCY }} {{ total_due|money }}</span> total outstanding
+  </div>
+</section>
+
+<div class="layout-split">
+  <section class="card">
+    {% if customers %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Phone</th>
+          <th>Shop / Address</th>
+          <th class="num">Current Due</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in customers %}
+        <tr class="{{ 'row-due' if c.balance > 0 }}">
+          <td>
+            <a class="link-strong" href="{{ url_for('customer_detail', customer_id=c.id) }}">{{ c.name }}</a>
+          </td>
+          <td>{{ c.phone or '—' }}</td>
+          <td class="muted">
+            {{ c.shop_name or '—' }}{% if c.address %}<br><span class="small">{{ c.address }}</span>{% endif %}
+          </td>
+          <td class="num {{ 'amount-due' if c.balance > 0 }}">
+            {% if c.credit > 0 %}
+              <span class="credit-amount">Credit {{ CURRENCY }} {{ c.credit|money }}</span>
+            {% else %}
+              {{ CURRENCY }} {{ c.balance|money }}
+            {% endif %}
+          </td>
+          <td class="actions">
+            <a class="btn btn-small" href="{{ url_for('customer_detail', customer_id=c.id) }}">Open</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p class="empty">No customers yet. Add one here, or create it while making a receipt.</p>
+    {% endif %}
+  </section>
+
+  <aside class="card card-side">
+    <h3>Add a customer</h3>
+    <form method="post" action="{{ url_for('add_customer_form') }}" class="stack">
+      <label>
+        Name
+        <input class="input" type="text" name="name" placeholder="Karim Traders" required>
+      </label>
+      <label>
+        Phone
+        <input class="input" type="tel" name="phone" placeholder="01711-000000">
+      </label>
+      <label>
+        Shop name
+        <input class="input" type="text" name="shop_name" placeholder="Karim Hardware">
+      </label>
+      <label>
+        Shop address
+        <input class="input" type="text" name="address" placeholder="Mirpur 10, Dhaka">
+      </label>
+      <button type="submit" class="btn btn-primary btn-full">Add customer</button>
+    </form>
+  </aside>
+</div>
+{% endblock %}

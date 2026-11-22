@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ invoice_no }} — {{ SHOP.name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/receipt.css') }}">
+</head>
+<body class="receipt-page">
+
+  {% macro receipt_body(copy_label, show_signature, extra_class='') %}
+  {% set prev_due_display = [sale.previous_due, 0]|max %}
+  {% set credit_used = [sale.credit_used, 0]|max %}
+  {% set cash_applied = [sale.cash_applied, 0]|max %}
+  {% set due_display = [sale.new_due, 0]|max %}
+  {% set scrap_display = [sale.scrap_total, 0]|max %}
+  {% set scrap_black_value = [sale.scrap_black_kg * sale.scrap_black_rate, 0]|max %}
+  {% set scrap_white_value = [sale.scrap_white_kg * sale.scrap_white_rate, 0]|max %}
+  {# Scrap above the bill is not change; it stays on the account as credit. #}
+  {% set scrap_credit = [scrap_display - [sale.grand_total, 0]|max, 0]|max %}
+  {% set change_display = [sale.paid - cash_applied, 0]|max %}
+  <section class="receipt-copy {{ extra_class }}">
+    <div class="copy-banner">{{ copy_label }}</div>
+
+    <header class="receipt-header">
+      <h1>{{ SHOP.name }}</h1>
+      <p>{{ SHOP.tagline }}</p>
+      <p>{{ SHOP.address }}</p>
+      <p>Phone: {{ SHOP.phone }}</p>
+    </header>
+
+    <div class="receipt-rule"></div>
+
+    <div class="receipt-meta">
+      <div><span>Invoice</span><b>{{ invoice_no }}</b></div>
+      <div><span>Date</span><b>{{ sale.created_at }}</b></div>
+      <div><span>Customer</span><b>{{ customer.name }}</b></div>
+      <div><span>Shop</span><b>{{ customer.shop_name or '—' }}</b></div>
+      <div><span>Phone</span><b>{{ customer.phone or '—' }}</b></div>
+      <div><span>Address</span><b>{{ customer.address or '—' }}</b></div>
+    </div>
+
+    <div class="receipt-rule"></div>
+
+    <table class="receipt-table">
+      <thead>
+        <tr>
+          <th class="col-item">Item</th>
+          <th class="num">Kg</th>
+          <th class="num">Rate</th>
+          <th class="num">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+        <tr>
+          <td>{{ item.product_name }}</td>
+          <td class="num">{{ '%.3f'|format(item.weight_kg) }}</td>
+          <td class="num">{{ item.price_per_kg|money }}</td>
+          <td class="num">{{ item.line_total|money }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="receipt-rule"></div>
+
+    <table class="receipt-totals">
+      <tr>
+        <td>Current bill total</td>
+        <td class="num">{{ CURRENCY }} {{ sale.subtotal|money }}</td>
+      </tr>
+      <tr>
+        <td>Previous due</td>
+        <td class="num">{{ CURRENCY }} {{ prev_due_display|money }}</td>
+      </tr>
+      {% if credit_used > 0 %}
+      <tr>
+        <td>Less: credit on account</td>
+        <td class="num">- {{ CURRENCY }} {{ credit_used|money }}</td>
+      </tr>
+      {% endif %}
+      <tr class="row-grand">
+        <td>Grand total</td>
+        <td class="num">{{ CURRENCY }} {{ sale.grand_total|money }}</td>
+      </tr>
+      {% if scrap_black_value > 0 %}
+      <tr>
+        <td>Scrap Black {{ '%.3f'|format(sale.scrap_black_kg) }} kg @ {{ sale.scrap_black_rate|money }}</td>
+        <td class="num">{{ CURRENCY }} {{ scrap_black_value|money }}</td>
+      </tr>
+      {% endif %}
+      {% if scrap_white_value > 0 %}
+      <tr>
+        <td>Scrap White {{ '%.3f'|format(sale.scrap_white_kg) }} kg @ {{ sale.scrap_white_rate|money }}</td>
+        <td class="num">{{ CURRENCY }} {{ scrap_white_value|money }}</td>
+      </tr>
+      {% endif %}
+      {% if scrap_display > 0 %}
+      <tr>
+        <td>Scrap value deducted</td>
+        <td class="num">- {{ CURRENCY }} {{ scrap_display|money }}</td>
+      </tr>
+      {% endif %}
+      {% if scrap_credit > 0 %}
+      <tr>
+        <td>Scrap kept as credit</td>
+        <td class="num">+ {{ CURRENCY }} {{ scrap_credit|money }}</td>
+      </tr>
+      {% endif %}
+      <tr>
+        <td>Amount paid today (cash)</td>
+        <td class="num">{{ CURRENCY }} {{ cash_applied|money }}</td>
+      </tr>
+      <tr class="row-due">
+        <td>Remaining due</td>
+        <td class="num">{{ CURRENCY }} {{ due_display|money }}</td>
+      </tr>
+      {% if change_display > 0 %}
+      <tr>
+        <td>Change returned</td>
+        <td class="num">{{ CURRENCY }} {{ change_display|money }}</td>
+      </tr>
+      {% endif %}
+    </table>
+
+    <div class="receipt-rule"></div>
+
+    <p class="receipt-note">
+      Total weight: {{ '%.3f'|format(items|sum(attribute='weight_kg')) }} kg
+    </p>
+    <p class="receipt-note">Items: {{ items|length }}</p>
+    <p class="receipt-note">Thank you for your business. Goods once sold are not returnable.</p>
+
+    {% if show_signature and due_display > 0 %}
+    <div class="sign-line">Customer Signature: _____________________</div>
+    {% endif %}
+
+    <p class="receipt-foot">Please keep this receipt for your records.</p>
+  </section>
+  {% endmacro %}
+
+  <div class="receipt-toolbar no-print">
+    <a class="btn" href="{{ url_for('billing') }}">← Back to billing</a>
+    {% if customer %}
+      <a class="btn" href="{{ url_for('customer_detail', customer_id=customer.id) }}">Customer ledger</a>
+    {% endif %}
+    <button class="btn btn-primary" onclick="window.print()">Print receipt</button>
+  </div>
+
+  <div class="receipt-sheet">
+    {{ receipt_body('*** CUSTOMER COPY ***', False) }}
+
+    <div class="tear-line" aria-hidden="true">- - - - - - - - - - - - - - - -</div>
+
+    {{ receipt_body('*** SHOP COPY ***', True, 'receipt-copy--shop') }}
+  </div>
+
+  {% if autoprint %}
+  <script>
+    window.addEventListener('load', function () {
+      setTimeout(function () { window.print(); }, 250);
+    });
+  </script>
+  {% endif %}
+</body>
+</html>

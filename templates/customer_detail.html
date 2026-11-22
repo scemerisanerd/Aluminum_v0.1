@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}{{ customer.name }} — Ledger{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="breadcrumb"><a href="{{ url_for('customers') }}">← All customers</a></p>
+    <h2>{{ customer.name }}</h2>
+    <p class="muted">
+      {{ customer.shop_name or 'No shop name' }}
+      {% if customer.phone %} • {{ customer.phone }}{% endif %}
+      {% if customer.address %} • {{ customer.address }}{% endif %}
+    </p>
+  </div>
+  {% if credit > 0 %}
+  <div class="stat-chip stat-chip-credit">
+    <span>{{ CURRENCY }} {{ credit|money }}</span> credit on account
+  </div>
+  {% else %}
+  <div class="stat-chip {{ 'stat-chip-danger' if balance > 0 }}">
+    <span>{{ CURRENCY }} {{ balance|money }}</span> current due
+  </div>
+  {% endif %}
+</section>
+
+<section class="summary-row">
+  <div class="mini-stat"><span>Invoices</span><b>{{ sales|length }}</b></div>
+  <div class="mini-stat"><span>Total billed</span><b>{{ CURRENCY }} {{ total_billed|money }}</b></div>
+  <div class="mini-stat"><span>Total paid</span><b>{{ CURRENCY }} {{ total_paid|money }}</b></div>
+  {% if credit > 0 %}
+  <div class="mini-stat"><span>Credit balance</span><b>{{ CURRENCY }} {{ credit|money }}</b></div>
+  {% else %}
+  <div class="mini-stat"><span>Outstanding</span><b>{{ CURRENCY }} {{ balance|money }}</b></div>
+  {% endif %}
+</section>
+
+<div class="layout-split">
+  <div class="stack">
+    <section class="card">
+      <h3>Purchase history</h3>
+      {% if sales %}
+        {% for s in sales %}
+        <div class="history-block">
+          <div class="history-head">
+            <div>
+              <a class="link-strong" href="{{ url_for('receipt', sale_id=s.id) }}" target="_blank">
+                INV-{{ '%05d'|format(s.id) }}
+              </a>
+              <span class="small muted"> • {{ s.created_at }}</span>
+            </div>
+            <div class="small muted">
+              Bill {{ CURRENCY }} {{ s.subtotal|money }} •
+              Prev. due {{ CURRENCY }} {{ s.previous_due|money }} •
+              Paid {{ CURRENCY }} {{ s.cash_applied|money }}
+              {% if s.credit_used > 0 %} • Credit used {{ CURRENCY }} {{ s.credit_used|money }}{% endif %}
+              {% if s.scrap_total > 0 %} • Scrap {{ CURRENCY }} {{ s.scrap_total|money }}{% endif %}
+            </div>
+          </div>
+          <table class="data-table data-table-compact">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th class="num">Weight (kg)</th>
+                <th class="num">Rate / kg</th>
+                <th class="num">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in items_by_sale[s.id] %}
+              <tr>
+                <td>{{ item.product_name }}</td>
+                <td class="num">{{ '%.3f'|format(item.weight_kg) }}</td>
+                <td class="num">{{ item.price_per_kg|money }}</td>
+                <td class="num">{{ item.line_total|money }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              {% if s.credit_used > 0 %}
+              <tr>
+                <td colspan="3" class="num">Credit on account applied</td>
+                <td class="num">- {{ CURRENCY }} {{ s.credit_used|money }}</td>
+              </tr>
+              {% endif %}
+              {% if s.scrap_total > 0 %}
+              <tr>
+                <td colspan="3" class="num">Scrap value deducted</td>
+                <td class="num">{{ CURRENCY }} {{ s.scrap_total|money }}</td>
+              </tr>
+              {% endif %}
+              {% if s.scrap_total > s.grand_total %}
+              <tr>
+                <td colspan="3" class="num">Scrap kept as credit</td>
+                <td class="num">+ {{ CURRENCY }} {{ (s.scrap_total - s.grand_total)|money }}</td>
+              </tr>
+              {% endif %}
+              <tr>
+                <td colspan="3" class="num">Cash paid on this invoice</td>
+                <td class="num">{{ CURRENCY }} {{ s.cash_applied|money }}</td>
+              </tr>
+              <tr>
+                <td colspan="3" class="num"><b>Bill total (incl. previous due)</b></td>
+                <td class="num"><b>{{ CURRENCY }} {{ s.grand_total|money }}</b></td>
+              </tr>
+              <tr>
+                <td colspan="3" class="num">Remaining due after this bill</td>
+                <td class="num">{{ CURRENCY }} {{ [s.new_due, 0]|max|money }}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="empty">No purchases yet. <a href="{{ url_for('billing') }}">Create the first receipt →</a></p>
+      {% endif %}
+    </section>
+
+    {% if scrap_entries %}
+    <section class="card">
+      <h3>Scrap received against due</h3>
+      <table class="data-table data-table-compact">
+        <thead>
+          <tr><th>Date</th><th>Scrap</th><th>Note</th><th class="num">Value</th></tr>
+        </thead>
+        <tbody>
+          {% for s in scrap_entries %}
+          <tr>
+            <td>{{ s.created_at }}</td>
+            <td>
+              {% if s.black_kg > 0 %}Black {{ '%.3f'|format(s.black_kg) }} kg @ {{ s.black_rate|money }}{% endif %}
+              {% if s.black_kg > 0 and s.white_kg > 0 %} • {% endif %}
+              {% if s.white_kg > 0 %}White {{ '%.3f'|format(s.white_kg) }} kg @ {{ s.white_rate|money }}{% endif %}
+            </td>
+            <td class="muted">{{ s.note or '—' }}</td>
+            <td class="num">{{ CURRENCY }} {{ s.total|money }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
+
+    {% if payments %}
+    <section class="card">
+      <h3>Due payments received</h3>
+      <table class="data-table data-table-compact">
+        <thead>
+          <tr><th>Date</th><th>Note</th><th class="num">Amount</th></tr>
+        </thead>
+        <tbody>
+          {% for p in payments %}
+          <tr>
+            <td>{{ p.created_at }}</td>
+            <td class="muted">{{ p.note or '—' }}</td>
+            <td class="num">{{ CURRENCY }} {{ p.amount|money }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
+  </div>
+
+  <aside class="stack">
+  <section class="card card-side">
+    <h3>Record due payment</h3>
+    <p class="small muted">Money received against the running balance (not a new sale).</p>
+    <form method="post" action="{{ url_for('record_payment', customer_id=customer.id) }}" class="stack">
+      <label>
+        Amount received ({{ CURRENCY }})
+        <input class="input input-lg" type="number" name="amount" step="0.01" min="0.01"
+               placeholder="{{ '%.2f'|format(balance if balance > 0 else 0) }}" required>
+      </label>
+      <label>
+        Note (optional)
+        <input class="input" type="text" name="note" placeholder="Cash / bKash ref.">
+      </label>
+      <button type="submit" class="btn btn-primary btn-full">Record payment</button>
+    </form>
+    <div class="divider"></div>
+    <p class="small muted">Remaining due after payment: <b id="after-payment">{{ CURRENCY }} {{ balance|money }}</b></p>
+    <script>
+      (function () {
+        var input = document.querySelector('input[name="amount"]');
+        var out = document.getElementById('after-payment');
+        var current = {{ balance|float }};
+        var currency = {{ CURRENCY|tojson }};
+        function fmt(n) {
+          return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+        input.addEventListener('input', function () {
+          var v = parseFloat(input.value);
+          if (isNaN(v) || v < 0) { out.textContent = currency + ' ' + fmt(current); return; }
+          out.textContent = v > current
+            ? currency + ' ' + fmt(v - current) + ' change'
+            : currency + ' ' + fmt(current - v);
+        });
+      })();
+    </script>
+  </section>
+
+  <section class="card card-side">
+    <h3>Scrap against due</h3>
+    <p class="small muted">Customer pays off an old due with scrap — no new bill is created.</p>
+    <form method="post" action="{{ url_for('record_scrap_payment', customer_id=customer.id) }}" class="stack">
+      <div class="form-grid">
+        <label>
+          Black scrap (kg)
+          <input class="input" type="number" name="black_kg" id="due-scrap-black"
+                 step="0.001" min="0" placeholder="0.000">
+        </label>
+        <label>
+          White scrap (kg)
+          <input class="input" type="number" name="white_kg" id="due-scrap-white"
+                 step="0.001" min="0" placeholder="0.000">
+        </label>
+      </div>
+      <p class="small muted">
+        Rates: Black {{ CURRENCY }} {{ scrap_rates['Black']|money }}/kg •
+        White {{ CURRENCY }} {{ scrap_rates['White']|money }}/kg —
+        <a href="{{ url_for('products') }}">edit rates</a>
+      </p>
+      <label>
+        Note (optional)
+        <input class="input" type="text" name="note" placeholder="Scrap weighed at shop">
+      </label>
+      <button type="submit" class="btn btn-primary btn-full">Record scrap</button>
+    </form>
+    <div class="divider"></div>
+    <p class="small muted">
+      Scrap value: <b id="scrap-entry-value">{{ CURRENCY }} 0.00</b><br>
+      Balance after scrap: <b id="after-scrap">{{ CURRENCY }} 0.00</b>
+    </p>
+    <script>
+      (function () {
+        var black = document.getElementById('due-scrap-black');
+        var white = document.getElementById('due-scrap-white');
+        var valueOut = document.getElementById('scrap-entry-value');
+        var dueOut = document.getElementById('after-scrap');
+        var current = {{ (balance - credit)|float }};
+        var currency = {{ CURRENCY|tojson }};
+        var rates = {
+          black: {{ scrap_rates['Black']|float }},
+          white: {{ scrap_rates['White']|float }}
+        };
+        function fmt(n) {
+          return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+        function value(input, rate) {
+          var kg = parseFloat(input.value);
+          return isNaN(kg) || kg < 0 ? 0 : kg * rate;
+        }
+        function recalc() {
+          var total = Math.round((value(black, rates.black) + value(white, rates.white)) * 100) / 100;
+          var left = Math.round((current - total) * 100) / 100;
+          valueOut.textContent = currency + ' ' + fmt(total);
+          dueOut.textContent = left < 0
+            ? currency + ' ' + fmt(-left) + ' credit'
+            : currency + ' ' + fmt(left);
+        }
+        black.addEventListener('input', recalc);
+        white.addEventListener('input', recalc);
+        recalc();
+      })();
+    </script>
+  </section>
+  </aside>
+</div>
+{% endblock %}

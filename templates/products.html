@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Products{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <h2>Products</h2>
+    <p class="muted">Prices are per kilogram. Change a price and press <b>Update</b> — new receipts use the new rate immediately.</p>
+  </div>
+  <div class="stat-chip">
+    <span>{{ products|length }}</span> products
+  </div>
+</section>
+
+<div class="layout-split">
+  <section class="card">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th>Category</th>
+          <th class="num">Price / kg</th>
+          <th class="actions">Quick update</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in products %}
+        <tr>
+          <td><strong>{{ p.name }}</strong></td>
+          <td><span class="tag">{{ p.category }}</span></td>
+          <td class="num">{{ CURRENCY }} {{ p.price_per_kg|money }}</td>
+          <td>
+            <form method="post" action="{{ url_for('update_price', product_id=p.id) }}" class="inline-form js-price-form">
+              <input type="number" name="price_per_kg" step="0.01" min="0"
+                     value="{{ '%.2f'|format(p.price_per_kg) }}" class="input input-price"
+                     aria-label="New price per kg for {{ p.name }}" required>
+              <button type="submit" class="btn btn-small">Update</button>
+            </form>
+          </td>
+          <td class="actions">
+            <form method="post" action="{{ url_for('delete_product', product_id=p.id) }}"
+                  onsubmit="return confirm('Remove {{ p.name }}? Past invoices are not affected.');">
+              <button type="submit" class="btn btn-small btn-ghost btn-danger" title="Remove product">✕</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <aside class="stack">
+    <section class="card card-side">
+      <h3>Scrap prices</h3>
+      <p class="small muted">Rate per kg paid when a customer settles a bill with scrap.</p>
+      <form method="post" action="{{ url_for('update_scrap_rates') }}" class="stack">
+        {% for name in scrap_types %}
+        <label>
+          {{ name }} scrap ({{ CURRENCY }} / kg)
+          <input class="input" type="number" name="rate_{{ name|lower }}" step="0.01" min="0"
+                 value="{{ '%.2f'|format(scrap_rates[name]) }}" required>
+        </label>
+        {% endfor %}
+        <button type="submit" class="btn btn-primary btn-full">Update scrap prices</button>
+      </form>
+    </section>
+
+    <section class="card card-side">
+      <h3>Add a product</h3>
+      <form method="post" action="{{ url_for('add_product') }}" class="stack">
+        <label>
+          Product name
+          <input class="input" type="text" name="name" placeholder="e.g. Aluminum Sheet 3 mm" required>
+        </label>
+        <label>
+          Category
+          <input class="input" type="text" name="category" list="category-list" placeholder="Sheets & Coils">
+          <datalist id="category-list">
+            {% for cat in products|map(attribute='category')|unique %}
+              <option value="{{ cat }}"></option>
+            {% endfor %}
+          </datalist>
+        </label>
+        <label>
+          Price per kg ({{ CURRENCY }})
+          <input class="input" type="number" name="price_per_kg" step="0.01" min="0" placeholder="395.00" required>
+        </label>
+        <button type="submit" class="btn btn-primary btn-full">Add product</button>
+      </form>
+    </section>
+  </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Enter inside a price box submits that row's form (quick keyboard updates).
+  document.querySelectorAll('.js-price-form input').forEach(function (input) {
+    input.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        input.closest('form').requestSubmit();
+      }
+    });
+  });
+</script>
+{% endblock %}

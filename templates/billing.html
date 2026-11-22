@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}New Receipt{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <h2>New Receipt</h2>
+    <p class="muted">Pick a customer, add weights in kg, take the payment, print.</p>
+  </div>
+  <div class="stat-chip stat-chip-strong" id="head-due">
+    <span>—</span> previous due
+  </div>
+</section>
+
+<div class="billing-grid">
+  <div class="stack">
+    <!-- Customer -->
+    <section class="card">
+      <div class="card-head">
+        <h3>1. Customer</h3>
+        <button type="button" class="btn btn-small btn-ghost" id="toggle-new-customer">+ New customer</button>
+      </div>
+
+      <div class="customer-search">
+        <input class="input" type="search" id="customer-search" autocomplete="off"
+               placeholder="Search customer by name, phone or shop…">
+        <div class="search-results" id="customer-results" hidden></div>
+      </div>
+
+      <div class="selected-customer" id="selected-customer" hidden>
+        <div>
+          <strong id="sc-name"></strong>
+          <p class="small muted" id="sc-meta"></p>
+        </div>
+        <div class="sc-due">
+          <span class="small muted" id="sc-due-label">Previous due</span>
+          <b id="sc-due"></b>
+        </div>
+        <button type="button" class="btn btn-small btn-ghost" id="clear-customer">Change</button>
+      </div>
+
+      <form class="new-customer-form stack" id="new-customer-form" hidden>
+        <div class="form-grid">
+          <label>
+            Name <span class="req">*</span>
+            <input class="input" type="text" name="name" placeholder="Karim Traders" required>
+          </label>
+          <label>
+            Phone
+            <input class="input" type="tel" name="phone" placeholder="01711-000000">
+          </label>
+          <label>
+            Shop name
+            <input class="input" type="text" name="shop_name" placeholder="Karim Hardware">
+          </label>
+          <label>
+            Shop address
+            <input class="input" type="text" name="address" placeholder="Mirpur 10, Dhaka">
+          </label>
+        </div>
+        <div class="row-actions">
+          <button type="submit" class="btn btn-primary btn-small">Save customer</button>
+          <button type="button" class="btn btn-small btn-ghost" id="cancel-new-customer">Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Items -->
+    <section class="card">
+      <div class="card-head">
+        <h3>2. Items</h3>
+        <button type="button" class="btn btn-small" id="add-row">+ Add line</button>
+      </div>
+
+      <table class="data-table items-table" id="items-table">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th class="num" style="width:130px">Weight (kg)</th>
+            <th class="num" style="width:110px">Rate / kg</th>
+            <th class="num" style="width:130px">Total</th>
+            <th style="width:44px"></th>
+          </tr>
+        </thead>
+        <tbody id="items-body"></tbody>
+      </table>
+      <p class="small muted hint">Tip: press <kbd>Enter</kbd> on the weight field to add another line.</p>
+    </section>
+
+    <!-- Scrap -->
+    <section class="card">
+      <div class="card-head">
+        <h3>3. Scrap received <span class="small muted">(optional)</span></h3>
+        <a class="small" href="{{ url_for('products') }}">Edit scrap rates</a>
+      </div>
+
+      <table class="data-table scrap-table">
+        <thead>
+          <tr>
+            <th>Scrap type</th>
+            <th class="num" style="width:150px">Weight (kg)</th>
+            <th class="num" style="width:120px">Rate / kg</th>
+            <th class="num" style="width:130px">Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for name in ['Black', 'White'] %}
+          <tr>
+            <td><strong>{{ name }} scrap</strong></td>
+            <td class="num">
+              <input class="input scrap-input" type="number" id="scrap-{{ name|lower }}"
+                     step="0.001" min="0" placeholder="0.000"
+                     aria-label="{{ name }} scrap weight in kg">
+            </td>
+            <td class="num scrap-rate" id="scrap-rate-{{ name|lower }}">{{ CURRENCY }} 0.00</td>
+            <td class="num scrap-value" id="scrap-value-{{ name|lower }}">{{ CURRENCY }} 0.00</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="3" class="num"><b>Total scrap value deducted</b></td>
+            <td class="num"><b id="scrap-total">{{ CURRENCY }} 0.00</b></td>
+          </tr>
+        </tfoot>
+      </table>
+      <p class="small muted hint">Scrap weighed in comes off this bill at today's scrap rate.</p>
+    </section>
+  </div>
+
+  <!-- Totals -->
+  <aside class="card totals-card">
+    <h3>4. Payment</h3>
+    <div class="totals">
+      <div class="total-row">
+        <span>Current bill total</span>
+        <b id="bill-total">{{ CURRENCY }} 0.00</b>
+      </div>
+      <div class="total-row">
+        <span>Previous due</span>
+        <b id="prev-due">{{ CURRENCY }} 0.00</b>
+      </div>
+      <div class="total-row total-row-strong">
+        <span>Grand total</span>
+        <b id="grand-total">{{ CURRENCY }} 0.00</b>
+      </div>
+      <div class="total-row total-row-less">
+        <span>Less: credit on account</span>
+        <b id="credit-used">{{ CURRENCY }} 0.00</b>
+      </div>
+      <div class="total-row total-row-less">
+        <span>Less: scrap value</span>
+        <b id="scrap-deduct">{{ CURRENCY }} 0.00</b>
+      </div>
+      <div class="total-row total-row-credit" id="scrap-credit-row" hidden>
+        <span>Scrap kept as credit</span>
+        <b id="scrap-credit">{{ CURRENCY }} 0.00</b>
+      </div>
+      <label class="paid-field">
+        Amount paid today ({{ CURRENCY }})
+        <input class="input input-lg" type="number" id="paid" step="0.01" min="0" value="0.00">
+      </label>
+      <div class="total-row new-due">
+        <span>New remaining due</span>
+        <b id="new-due">{{ CURRENCY }} 0.00</b>
+      </div>
+      <p class="small muted center" id="change-note" hidden></p>
+    </div>
+
+    <button type="button" class="btn btn-primary btn-full btn-print" id="save-print">
+      Save &amp; Print Receipt
+    </button>
+    <p class="small muted center" id="save-status" role="status"></p>
+
+    <div class="divider"></div>
+    <ul class="checklist small muted">
+      <li>Bill is saved to the customer ledger</li>
+      <li>Previous due carries forward automatically</li>
+      <li>Receipt opens ready for printing</li>
+    </ul>
+  </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/billing.js') }}"></script>
+{% endblock %}

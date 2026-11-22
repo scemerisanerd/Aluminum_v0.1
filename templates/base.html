@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Aluminum Wholesale POS{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body data-currency="{{ CURRENCY }}">
+  <header class="app-header no-print">
+    <div class="brand">
+      <span class="brand-mark">Al</span>
+      <div>
+        <h1>{{ SHOP.name }}</h1>
+        <p class="brand-sub">{{ SHOP.tagline }}</p>
+      </div>
+    </div>
+    <nav class="tabs">
+      <a href="{{ url_for('billing') }}" class="tab {{ 'is-active' if active == 'billing' }}">New Receipt</a>
+      <a href="{{ url_for('products') }}" class="tab {{ 'is-active' if active == 'products' }}">Products</a>
+      <a href="{{ url_for('customers') }}" class="tab {{ 'is-active' if active == 'customers' }}">Customers &amp; Due</a>
+    </nav>
+  </header>
+
+  <main class="app-main">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flashes no-print">
+          {% for category, message in messages %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="app-footer no-print">
+    Offline POS &amp; Due Ledger &nbsp;•&nbsp; {{ today }} &nbsp;•&nbsp; Data saved locally in <code>data/shop.db</code>
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

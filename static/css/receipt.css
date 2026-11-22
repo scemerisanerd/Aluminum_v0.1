@@ -1,0 +1,220 @@
+/* Printable receipt — 80mm thermal roll, 72mm printable width --------- */
+* { box-sizing: border-box; }
+
+body.receipt-page {
+  margin: 0;
+  padding: 20px 10px 36px;
+  background: #eef1f4;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: #000;
+  font-size: 12px;
+}
+
+.receipt-toolbar {
+  max-width: 300px;
+  margin: 0 auto 14px;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.btn {
+  display: inline-block;
+  padding: 7px 13px;
+  border-radius: 8px;
+  border: 1px solid #ccd5de;
+  background: #fff;
+  color: #1c2733;
+  font: inherit;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.btn-primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+/* The 72mm printable column, shown at the same proportion on screen. */
+.receipt-sheet {
+  width: 72mm;
+  margin: 0 auto;
+  background: #fff;
+  padding: 4mm 0;
+  box-shadow: 0 6px 20px rgba(20, 35, 50, .14);
+}
+
+.receipt-copy {
+  width: 72mm;
+  color: #000;
+}
+
+.copy-banner {
+  text-align: center;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: .06em;
+  margin: 0 0 3mm;
+  color: #000;
+}
+
+.receipt-header { text-align: center; }
+.receipt-header h1 {
+  margin: 0 0 2px;
+  font-size: 15px;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+}
+.receipt-header p { margin: 1px 0; font-size: 11px; color: #000; }
+
+.receipt-rule { border-top: 1px dashed #000; margin: 3mm 0; }
+
+.receipt-meta { font-size: 11px; }
+.receipt-meta > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 1px 0;
+}
+.receipt-meta span { color: #000; }
+.receipt-meta b { text-align: right; font-weight: 600; word-break: break-word; }
+
+.receipt-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 10.5px;
+}
+.receipt-table th {
+  text-align: left;
+  border-bottom: 1px solid #000;
+  padding: 4px 2px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.receipt-table td {
+  padding: 3px 2px;
+  border-bottom: 1px dotted #000;
+  word-break: break-word;
+}
+.receipt-table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.receipt-table .col-item { width: 40%; }
+.receipt-table th:nth-child(2), .receipt-table td:nth-child(2) { width: 17%; }
+.receipt-table th:nth-child(3), .receipt-table td:nth-child(3) { width: 20%; }
+.receipt-table th:nth-child(4), .receipt-table td:nth-child(4) { width: 23%; }
+
+.receipt-totals { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.receipt-totals td { padding: 2px 0; }
+.receipt-totals .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.receipt-totals .row-grand td {
+  border-top: 1px solid #000;
+  border-bottom: 1px solid #000;
+  font-weight: 700;
+  font-size: 12.5px;
+  padding: 3px 0;
+}
+.receipt-totals .row-due td { font-weight: 700; font-size: 12.5px; padding-top: 4px; }
+
+.receipt-note { text-align: center; font-size: 10px; margin: 2px 0; color: #000; }
+
+.sign-line {
+  margin-top: 7mm;
+  font-size: 10.5px;
+  border-top: 0;
+  color: #000;
+}
+
+.receipt-foot { text-align: center; font-size: 9.5px; margin: 4mm 0 0; color: #000; }
+
+/* Tear line between the two copies (screen + print). */
+.tear-line {
+  margin: 7mm 0;
+  padding: 3mm 0;
+  text-align: center;
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  letter-spacing: .05em;
+  color: #000;
+  border-top: 1px dashed #000;
+  border-bottom: 1px dashed #000;
+}
+
+/* --- Print: 80mm roll, zero margins, 72mm content ------------------- */
+@media print {
+  @page { size: 80mm auto; margin: 0mm; }
+
+  html, body { margin: 0; padding: 0; background: #fff; }
+
+  body.receipt-page {
+    width: 80mm;
+    padding: 0;
+    font-size: 9pt;
+    color: #000;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Hide the toolbar/buttons and any site chrome. */
+  .no-print,
+  nav, header.site-header, footer.site-footer {
+    display: none !important;
+  }
+
+  .receipt-sheet {
+    width: 72mm;
+    max-width: 72mm;
+    margin: 0 auto;
+    padding: 0;
+    background: #fff;
+    box-shadow: none;
+  }
+
+  .receipt-copy {
+    width: 72mm;
+    color: #000;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* Explicit page break: the shop copy always starts on its own piece of
+   * roll, so it can never be split by a cut. */
+  .receipt-copy--shop {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  .copy-banner { font-size: 9.5pt; margin: 0 0 2mm; }
+
+  .receipt-header h1 { font-size: 12pt; }
+  .receipt-header p { font-size: 8.5pt; }
+
+  .receipt-rule { border-top: 1px dashed #000; margin: 2mm 0; }
+
+  .receipt-meta,
+  .receipt-table,
+  .receipt-totals { font-size: 8.5pt; }
+
+  .receipt-table th { font-size: 7.5pt; }
+  .receipt-table tr, .receipt-totals tr { page-break-inside: avoid; }
+  .receipt-table td { border-bottom: 1px dotted #000; }
+
+  .receipt-totals .row-grand td,
+  .receipt-totals .row-due td { font-size: 9.5pt; }
+
+  .receipt-note { font-size: 8pt; }
+  .receipt-foot { font-size: 7.5pt; margin: 3mm 0 0; }
+
+  .sign-line { margin-top: 8mm; font-size: 8.5pt; }
+
+  .tear-line {
+    margin: 8mm 0;
+    padding: 3mm 0;
+    border-top: 1px dashed #000;
+    border-bottom: 1px dashed #000;
+    font-size: 9pt;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    /* Keep the tear line on the customer-copy page, right above the cut. */
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+}
