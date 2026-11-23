@@ -7,6 +7,7 @@ Run:  python app.py      (then open http://127.0.0.1:5000)
 
 import csv
 import io
+import json
 import os
 import sqlite3
 import threading
@@ -43,10 +44,10 @@ BACKUP_KEEP = 72
 # Shop settings shown on the printed receipt. Edit these to your own shop.
 # ---------------------------------------------------------------------------
 SHOP = {
-    "name": "AL-NOOR ALUMINUM TRADERS",
-    "tagline": "Aluminum Wholesale  •  Sheets, Profiles, Pipes & Rods",
-    "address": "12 Steel Market Road, Kadamtali, Dhaka",
-    "phone": "01700-000000",
+    "name": "M/S HASAN ALUMINUM INDUSTRIES",
+    "tagline": "Aluminum Wholesale",
+    "address": "Mizirpul, Muradpur, Chattogram",
+    "phone": "+880 1700-000000",
 }
 CURRENCY = "Tk."
 
@@ -137,11 +138,34 @@ CREATE TABLE IF NOT EXISTS scrap_payments (
     created_at   TEXT    NOT NULL
 );
 
+-- Unfinished receipts parked while the shop serves the next customer. A draft
+-- is not a sale: nothing here reaches customer due, the ledger or the Daily
+-- Sales figures until it is finalized with Save & Print.
+CREATE TABLE IF NOT EXISTS draft_receipts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    label            TEXT    NOT NULL DEFAULT '',
+    customer_id      INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+    customer_name    TEXT    NOT NULL DEFAULT '',
+    customer_phone   TEXT    NOT NULL DEFAULT '',
+    customer_shop    TEXT    NOT NULL DEFAULT '',
+    customer_address TEXT    NOT NULL DEFAULT '',
+    items_json       TEXT    NOT NULL DEFAULT '[]',
+    paid             REAL    NOT NULL DEFAULT 0,
+    waive            INTEGER NOT NULL DEFAULT 0,
+    waive_amount     REAL    NOT NULL DEFAULT 0,
+    scrap_black_kg   REAL    NOT NULL DEFAULT 0,
+    scrap_white_kg   REAL    NOT NULL DEFAULT 0,
+    total            REAL    NOT NULL DEFAULT 0,
+    created_at       TEXT    NOT NULL,
+    updated_at       TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sales_customer ON sales(customer_id);
 CREATE INDEX IF NOT EXISTS idx_items_sale ON sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS idx_payments_customer ON payments(customer_id);
 CREATE INDEX IF NOT EXISTS idx_scrap_payments_customer
     ON scrap_payments(customer_id);
+CREATE INDEX IF NOT EXISTS idx_drafts_updated ON draft_receipts(updated_at);
 """
 
 # Columns added to databases created before scrap support existed.
@@ -1030,11 +1054,227 @@ def api_customer_create():
     return jsonify(data), 201
 
 
+# ---------------------------------------------------------------------------
+# Held receipts (drafts). An unfinished bill is parked in SQLite so it survives
+# a refresh, a closed tab or an app restart. Drafts are read by the billing
+# screen only: they never touch customer due, the ledger or Daily Sales.
+# ---------------------------------------------------------------------------
+DRAFT_LABEL_MAX = 60
+
+
+def draft_line_items(db, raw_items):
+    """Lines for a draft, always priced from the database, never the browser."""
+    items = []
+    for raw in raw_items or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            product_id = int(raw.get("product_id"))
+            weight = round(float(raw.get("weight_kg")), 3)
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0:
+            continue
+        product = db.execute(
+            "SELECT id, name, price_per_kg FROM products WHERE id = ?",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            continue
+        items.append(
+            {
+                "product_id": product["id"],
+                "product_name": product["name"],
+                "weight_kg": weight,
+                "price_per_kg": product["price_per_kg"],
+                "line_total": round(weight * product["price_per_kg"], 2),
+            }
+        )
+    return items
+
+
+def draft_items(row):
+    try:
+        items = json.loads(row["items_json"] or "[]")
+    except (TypeError, ValueError):
+        items = []
+    return items if isinstance(items, list) else []
+
+
+def draft_summary(row):
+    return {
+        "id": row["id"],
+        "label": row["label"],
+        "customer_id": row["customer_id"],
+        "customer_name": row["customer_name"],
+        "customer_shop": row["customer_shop"],
+        "item_count": len(draft_items(row)),
+        "total": row["total"],
+        "paid": row["paid"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def draft_detail(row):
+    data = draft_summary(row)
+    data.update(
+        {
+            "customer_phone": row["customer_phone"],
+            "customer_address": row["customer_address"],
+            "items": draft_items(row),
+            "waive": bool(row["waive"]),
+            "waive_amount": row["waive_amount"],
+            "scrap_black_kg": row["scrap_black_kg"],
+            "scrap_white_kg": row["scrap_white_kg"],
+        }
+    )
+    return data
+
+
+@app.get("/api/drafts")
+def api_drafts():
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM draft_receipts ORDER BY updated_at DESC, id DESC"
+    ).fetchall()
+    return jsonify([draft_summary(row) for row in rows])
+
+
+@app.get("/api/drafts/<int:draft_id>")
+def api_draft(draft_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM draft_receipts WHERE id = ?", (draft_id,)
+    ).fetchone()
+    if row is None:
+        return jsonify({"error": "That held receipt no longer exists."}), 404
+    return jsonify(draft_detail(row))
+
+
+@app.post("/api/drafts")
+def api_draft_save():
+    payload = request.get_json(silent=True) or {}
+    db = get_db()
+
+    customer_id = payload.get("customer_id")
+    try:
+        customer_id = int(customer_id) if customer_id else None
+    except (TypeError, ValueError):
+        customer_id = None
+    if customer_id and load_customer(db, customer_id) is None:
+        customer_id = None
+
+    items = draft_line_items(db, payload.get("items"))
+    if not items:
+        return jsonify(
+            {"error": "Add at least one product line before holding the receipt."}
+        ), 400
+
+    info = payload.get("customer") or {}
+    if not isinstance(info, dict):
+        info = {}
+
+    def text_field(key, limit=120):
+        return str(info.get(key) or "").strip()[:limit]
+
+    label = str(payload.get("label") or "").strip()[:DRAFT_LABEL_MAX]
+    if not label:
+        label = (text_field("name") or "Held receipt")[:DRAFT_LABEL_MAX]
+
+    def amount(value):
+        try:
+            return max(0.0, round(float(value or 0), 2))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def kilos(value):
+        try:
+            return max(0.0, round(float(value or 0), 3))
+        except (TypeError, ValueError):
+            return 0.0
+
+    scrap = payload.get("scrap") or {}
+    if not isinstance(scrap, dict):
+        scrap = {}
+
+    values = (
+        label,
+        customer_id,
+        text_field("name"),
+        text_field("phone"),
+        text_field("shop_name"),
+        text_field("address", 200),
+        json.dumps(items),
+        amount(payload.get("paid")),
+        1 if payload.get("waive") else 0,
+        amount(payload.get("waive_amount")),
+        kilos(scrap.get("black_kg")),
+        kilos(scrap.get("white_kg")),
+        round(sum(item["line_total"] for item in items), 2),
+    )
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    draft_id = payload.get("id")
+    try:
+        draft_id = int(draft_id) if draft_id else None
+    except (TypeError, ValueError):
+        draft_id = None
+    existing = None
+    if draft_id:
+        existing = db.execute(
+            "SELECT id FROM draft_receipts WHERE id = ?", (draft_id,)
+        ).fetchone()
+
+    if existing:
+        db.execute(
+            "UPDATE draft_receipts SET label = ?, customer_id = ?,"
+            " customer_name = ?, customer_phone = ?, customer_shop = ?,"
+            " customer_address = ?, items_json = ?, paid = ?, waive = ?,"
+            " waive_amount = ?, scrap_black_kg = ?, scrap_white_kg = ?,"
+            " total = ?, updated_at = ? WHERE id = ?",
+            values + (now, draft_id),
+        )
+    else:
+        cur = db.execute(
+            "INSERT INTO draft_receipts (label, customer_id, customer_name,"
+            " customer_phone, customer_shop, customer_address, items_json,"
+            " paid, waive, waive_amount, scrap_black_kg, scrap_white_kg, total,"
+            " created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            values + (now, now),
+        )
+        draft_id = cur.lastrowid
+    db.commit()
+
+    row = db.execute(
+        "SELECT * FROM draft_receipts WHERE id = ?", (draft_id,)
+    ).fetchone()
+    return jsonify(draft_detail(row)), 201
+
+
+@app.delete("/api/drafts/<int:draft_id>")
+def api_draft_delete(draft_id):
+    db = get_db()
+    cur = db.execute("DELETE FROM draft_receipts WHERE id = ?", (draft_id,))
+    db.commit()
+    if cur.rowcount == 0:
+        return jsonify({"error": "That held receipt no longer exists."}), 404
+    return jsonify({"deleted": draft_id})
+
+
 @app.post("/api/sales")
 def api_create_sale():
     payload = request.get_json(silent=True) or {}
     customer_id = payload.get("customer_id")
     raw_items = payload.get("items") or []
+
+    # A receipt resumed from a held draft carries its draft id, so finalizing
+    # it can drop the draft in the same transaction.
+    try:
+        draft_id = int(payload.get("draft_id") or 0)
+    except (TypeError, ValueError):
+        draft_id = 0
 
     try:
         paid = round(float(payload.get("paid") or 0), 2)
@@ -1157,6 +1397,9 @@ def api_create_sale():
                 for line in lines
             ],
         )
+        # A finalized draft stops being a draft in the same transaction.
+        if draft_id:
+            db.execute("DELETE FROM draft_receipts WHERE id = ?", (draft_id,))
         db.commit()
     except sqlite3.Error as exc:
         db.rollback()

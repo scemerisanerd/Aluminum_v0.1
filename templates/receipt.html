@@ -24,6 +24,7 @@
     <div class="copy-banner">{{ copy_label }}</div>
 
     <header class="receipt-header">
+      <img class="receipt-logo" src="{{ url_for('static', filename='img/logo.webp') }}" alt="{{ SHOP.name }} logo">
       <h1>{{ SHOP.name }}</h1>
       <p>{{ SHOP.tagline }}</p>
       <p>{{ SHOP.address }}</p>

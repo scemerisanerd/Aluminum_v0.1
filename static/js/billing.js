@@ -9,6 +9,8 @@
     customer: null,
     scrapRates: {},
     roundOff: 0,
+    drafts: [],
+    draftId: null,
   };
 
   const el = {
@@ -50,6 +52,12 @@
     savePrint: document.getElementById("save-print"),
     status: document.getElementById("save-status"),
     headDue: document.getElementById("head-due"),
+    holdLabel: document.getElementById("draft-label"),
+    holdBtn: document.getElementById("hold-receipt"),
+    holdStatus: document.getElementById("hold-status"),
+    draftsList: document.getElementById("drafts-list"),
+    draftsCount: document.getElementById("drafts-count"),
+    draftsToggle: document.getElementById("drafts-toggle"),
   };
 
   const money = (n) =>
@@ -94,7 +102,7 @@
     return select;
   }
 
-  function addRow() {
+  function addRow(prefill) {
     if (!state.products.length) {
       setStatus("No products found. Add products on the Products tab first.", true);
       return;
@@ -102,7 +110,9 @@
     const tr = document.createElement("tr");
 
     const tdProduct = document.createElement("td");
-    tdProduct.appendChild(buildProductSelect(""));
+    tdProduct.appendChild(
+      buildProductSelect(prefill && prefill.productId ? prefill.productId : "")
+    );
 
     const tdWeight = document.createElement("td");
     tdWeight.className = "num";
@@ -134,6 +144,14 @@
 
     tr.append(tdProduct, tdWeight, tdRate, tdTotal, tdRemove);
     el.itemsBody.appendChild(tr);
+    if (prefill) {
+      // Restoring a held draft must not steal the caret or scroll the page.
+      if (prefill.weight !== undefined && prefill.weight !== null) {
+        weight.value = String(prefill.weight);
+      }
+      recalcRow(tr);
+      return;
+    }
     weight.focus();
   }
 
@@ -491,6 +509,7 @@
           scrap: scrap,
           paid: paid,
           round_off: roundOff,
+          draft_id: state.draftId || null,
         }),
       });
       const data = await res.json();
@@ -516,6 +535,7 @@
         el.status.append("Saved. Receipt tab was blocked — ", link);
       }
       resetForm();
+      await loadDrafts();
     } catch (err) {
       if (printWindow && !printWindow.closed) printWindow.close();
       setStatus(err.message || "Could not save the sale.", true);
@@ -525,6 +545,7 @@
   }
 
   function resetForm() {
+    state.draftId = null;
     el.itemsBody.innerHTML = "";
     addRow();
     el.paid.value = "0.00";
@@ -532,7 +553,270 @@
     el.scrapWhite.value = "";
     el.waive.checked = false;
     el.waiveAmount.value = "";
+    el.holdLabel.value = "";
+    el.holdStatus.textContent = "";
+    el.holdStatus.style.color = "";
     clearCustomer();
+  }
+
+  /* ---------------- held drafts (SQLite) ---------------- */
+  function draftCustomer() {
+    if (state.customer) {
+      return {
+        name: state.customer.name || "",
+        phone: state.customer.phone || "",
+        shop_name: state.customer.shop_name || "",
+        address: state.customer.address || "",
+      };
+    }
+    // A customer typed into "+ New customer" but not saved yet is kept too.
+    const form = el.newForm;
+    if (!form || form.hidden) {
+      return { name: "", phone: "", shop_name: "", address: "" };
+    }
+    const field = (name) =>
+      form.elements[name] ? form.elements[name].value.trim() : "";
+    return {
+      name: field("name"),
+      phone: field("phone"),
+      shop_name: field("shop_name"),
+      address: field("address"),
+    };
+  }
+
+  function draftPayload() {
+    const items = [];
+    el.itemsBody.querySelectorAll("tr").forEach((tr) => {
+      const { productId, weight } = rowValues(tr);
+      if (!productId || !(weight > 0)) return;
+      items.push({ product_id: productId, weight_kg: weight });
+    });
+    const paidValue = parseFloat(el.paid.value);
+    const waiveValue = parseFloat(el.waiveAmount.value);
+    return {
+      id: state.draftId,
+      label: el.holdLabel.value.trim(),
+      customer_id: state.customer ? state.customer.id : null,
+      customer: draftCustomer(),
+      items: items,
+      paid: isNaN(paidValue) || paidValue < 0 ? 0 : paidValue,
+      waive: !!(el.waive && el.waive.checked),
+      waive_amount: isNaN(waiveValue) || waiveValue < 0 ? 0 : waiveValue,
+      scrap: scrapPayload(),
+    };
+  }
+
+  function timeHeld(stamp) {
+    const then = new Date(String(stamp || "").replace(" ", "T"));
+    if (isNaN(then.getTime())) return "";
+    const minutes = Math.floor((Date.now() - then.getTime()) / 60000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return minutes + " min ago";
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + (hours === 1 ? " hour ago" : " hours ago");
+    return then.toLocaleDateString();
+  }
+
+  function renderDrafts(list) {
+    state.drafts = list;
+    el.draftsCount.textContent = "(" + list.length + ")";
+    el.draftsList.innerHTML = "";
+
+    if (!list.length) {
+      const empty = document.createElement("li");
+      empty.className = "drafts-empty";
+      empty.textContent = "No held receipts.";
+      el.draftsList.appendChild(empty);
+      return;
+    }
+
+    list.forEach((draft) => {
+      const li = document.createElement("li");
+      li.className = "draft-row" + (draft.id === state.draftId ? " is-open" : "");
+
+      const main = document.createElement("div");
+      const label = document.createElement("b");
+      label.className = "draft-label";
+      label.textContent = draft.label || "Held receipt";
+
+      const meta = document.createElement("span");
+      meta.className = "draft-meta";
+      const bits = [];
+      const who = [draft.customer_name, draft.customer_shop]
+        .filter(Boolean)
+        .join(" • ");
+      if (who && who !== draft.label) bits.push(who);
+      bits.push(draft.item_count + (draft.item_count === 1 ? " item" : " items"));
+      bits.push(CURRENCY + " " + money(draft.total));
+      bits.push("held " + timeHeld(draft.updated_at));
+      meta.textContent = bits.join(" • ");
+      main.append(label, meta);
+
+      const actions = document.createElement("div");
+      actions.className = "draft-actions";
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "btn btn-small";
+      resume.dataset.resume = String(draft.id);
+      resume.textContent = draft.id === state.draftId ? "Reload" : "Resume";
+      const discard = document.createElement("button");
+      discard.type = "button";
+      discard.className = "btn btn-small btn-ghost btn-danger";
+      discard.dataset.discard = String(draft.id);
+      discard.textContent = "Discard";
+      actions.append(resume, discard);
+
+      li.append(main, actions);
+      el.draftsList.appendChild(li);
+    });
+  }
+
+  async function loadDrafts() {
+    try {
+      const res = await fetch("/api/drafts");
+      if (!res.ok) throw new Error();
+      renderDrafts(await res.json());
+    } catch (err) {
+      setStatus("Could not load held receipts. Is the server running?", true);
+    }
+  }
+
+  /* Index of the first half-filled line, or -1. Holding must not drop it. */
+  function unfinishedLine() {
+    const rows = el.itemsBody.querySelectorAll("tr");
+    for (let i = 0; i < rows.length; i += 1) {
+      const { productId, weight, weightRaw } = rowValues(rows[i]);
+      if (!productId && !weightRaw) continue; // untouched blank line
+      if (!productId || !(weight > 0)) return i;
+    }
+    return -1;
+  }
+
+  async function holdReceipt() {
+    const badIndex = unfinishedLine();
+    if (badIndex >= 0) {
+      const row = el.itemsBody.querySelectorAll("tr")[badIndex];
+      const { productId } = rowValues(row);
+      el.holdStatus.style.color = "#c62f3c";
+      el.holdStatus.textContent =
+        "Line " + (badIndex + 1) +
+        (productId
+          ? " has no weight. Enter kg or remove the line, then hold again."
+          : " has no product selected. Pick one or remove the line, then hold again.");
+      (productId
+        ? row.querySelector(".weight-input")
+        : row.querySelector(".product-select")
+      ).focus();
+      return;
+    }
+    const payload = draftPayload();
+    if (!payload.items.length) {
+      setStatus("Add at least one product line before holding the receipt.", true);
+      return;
+    }
+    el.holdBtn.disabled = true;
+    el.holdStatus.style.color = "";
+    el.holdStatus.textContent = "Holding…";
+    try {
+      const res = await fetch("/api/drafts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not hold the receipt.");
+      resetForm();
+      el.holdStatus.textContent = "Held “" + data.label + "” — screen cleared for the next customer.";
+      await loadDrafts();
+    } catch (err) {
+      el.holdStatus.style.color = "#c62f3c";
+      el.holdStatus.textContent = err.message || "Could not hold the receipt.";
+    } finally {
+      el.holdBtn.disabled = false;
+    }
+  }
+
+  function openNewCustomer(draft) {
+    const form = el.newForm;
+    form.hidden = false;
+    form.elements["name"].value = draft.customer_name || "";
+    form.elements["phone"].value = draft.customer_phone || "";
+    form.elements["shop_name"].value = draft.customer_shop || "";
+    form.elements["address"].value = draft.customer_address || "";
+    el.search.closest(".customer-search").hidden = true;
+  }
+
+  async function restoreCustomer(customerId, draft) {
+    try {
+      const res = await fetch("/api/customers/" + customerId);
+      if (res.ok) {
+        // Balance/credit are re-read, so a resumed draft shows today's due.
+        showCustomer(await res.json());
+        return;
+      }
+    } catch (err) {}
+    openNewCustomer(draft);
+  }
+
+  async function resumeDraft(draftId) {
+    el.holdStatus.style.color = "";
+    el.holdStatus.textContent = "Restoring…";
+    try {
+      const res = await fetch("/api/drafts/" + draftId);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not open that held receipt.");
+
+      resetForm();
+      state.draftId = data.id;
+      el.holdLabel.value = data.label || "";
+      el.paid.value = (Number(data.paid) || 0).toFixed(2);
+      el.scrapBlack.value = data.scrap_black_kg ? String(data.scrap_black_kg) : "";
+      el.scrapWhite.value = data.scrap_white_kg ? String(data.scrap_white_kg) : "";
+      el.waive.checked = !!data.waive;
+      el.waiveAmount.value = data.waive_amount ? String(data.waive_amount) : "";
+
+      el.itemsBody.innerHTML = "";
+      (data.items || []).forEach((item) => {
+        addRow({ productId: item.product_id, weight: item.weight_kg });
+      });
+      if (!el.itemsBody.querySelectorAll("tr").length) addRow();
+
+      if (data.customer_id) {
+        await restoreCustomer(data.customer_id, data);
+      } else if (data.customer_name) {
+        openNewCustomer(data);
+      }
+
+      el.holdStatus.textContent =
+        "Editing held receipt — Save & Print finalizes it and removes it from the list.";
+      recalcTotals();
+      await loadDrafts();
+    } catch (err) {
+      el.holdStatus.style.color = "#c62f3c";
+      el.holdStatus.textContent = err.message || "Could not open that held receipt.";
+    }
+  }
+
+  async function discardDraft(draftId) {
+    const draft = (state.drafts || []).find((item) => item.id === draftId);
+    const name = draft && draft.label ? "“" + draft.label + "”" : "this held receipt";
+    if (!window.confirm("Discard " + name + "? It is deleted and never becomes a sale.")) {
+      return;
+    }
+    try {
+      const res = await fetch("/api/drafts/" + draftId, { method: "DELETE" });
+      if (!res.ok && res.status !== 404) throw new Error();
+      if (state.draftId === draftId) {
+        state.draftId = null;
+        el.holdLabel.value = "";
+        el.holdStatus.style.color = "";
+        el.holdStatus.textContent =
+          "Draft discarded — the bill is still on screen; hold it again to keep it.";
+      }
+      await loadDrafts();
+    } catch (err) {
+      setStatus("Could not discard that held receipt.", true);
+    }
   }
 
   /* ---------------- wiring ---------------- */
@@ -648,6 +932,22 @@
   });
   el.savePrint.addEventListener("click", saveSale);
 
+  el.holdBtn.addEventListener("click", holdReceipt);
+  el.draftsList.addEventListener("click", (event) => {
+    const resumeBtn = event.target.closest("[data-resume]");
+    if (resumeBtn) {
+      resumeDraft(parseInt(resumeBtn.dataset.resume, 10));
+      return;
+    }
+    const discardBtn = event.target.closest("[data-discard]");
+    if (discardBtn) discardDraft(parseInt(discardBtn.dataset.discard, 10));
+  });
+  el.draftsToggle.addEventListener("click", () => {
+    const open = el.draftsList.hidden;
+    el.draftsList.hidden = !open;
+    el.draftsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
   /* ---------------- start ---------------- */
   (async function init() {
     try {
@@ -666,5 +966,6 @@
     await loadScrapRates();
     addRow();
     recalcTotals();
+    await loadDrafts();
   })();
 })();

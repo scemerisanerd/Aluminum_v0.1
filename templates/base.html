@@ -8,24 +8,26 @@
 </head>
 <body class="{% block body_class %}{% endblock %}" data-currency="{{ CURRENCY }}">
   <header class="app-header no-print">
-    <div class="brand">
-      <span class="brand-mark">Al</span>
-      <div>
-        <h1>{{ SHOP.name }}</h1>
-        <p class="brand-sub">{{ SHOP.tagline }}</p>
+    <div class="app-header-inner">
+      <div class="brand">
+        <img class="brand-logo" src="{{ url_for('static', filename='img/logo.webp') }}" alt="{{ SHOP.name }} logo">
+        <div>
+          <h1>{{ SHOP.name }}</h1>
+          <p class="brand-sub">{{ SHOP.tagline }}</p>
+        </div>
       </div>
-    </div>
-    <nav class="tabs">
-      <a href="{{ url_for('billing') }}" class="tab {{ 'is-active' if active == 'billing' }}">New Receipt</a>
-      <a href="{{ url_for('products') }}" class="tab {{ 'is-active' if active == 'products' }}">Products</a>
-      <a href="{{ url_for('daily_summary') }}" class="tab {{ 'is-active' if active == 'daily' }}">Daily Sales</a>
-      <a href="{{ url_for('customers') }}" class="tab {{ 'is-active' if active == 'customers' }}">Customers &amp; Due</a>
-    </nav>
-    <div class="data-tools">
-      <a href="{{ url_for('download_backup') }}" class="tab-data"
-         title="Save a timestamped copy of data/shop.db to your Downloads folder">Download Backup (.db)</a>
-      <a href="{{ url_for('export_customers_csv') }}" class="tab-data"
-         title="Customer due list as a spreadsheet file">Export Customers &amp; Dues (.csv)</a>
+      <nav class="tabs">
+        <a href="{{ url_for('billing') }}" class="tab {{ 'is-active' if active == 'billing' }}">New Receipt</a>
+        <a href="{{ url_for('products') }}" class="tab {{ 'is-active' if active == 'products' }}">Products</a>
+        <a href="{{ url_for('daily_summary') }}" class="tab {{ 'is-active' if active == 'daily' }}">Daily Sales</a>
+        <a href="{{ url_for('customers') }}" class="tab {{ 'is-active' if active == 'customers' }}">Customers &amp; Due</a>
+      </nav>
+      <div class="data-tools">
+        <a href="{{ url_for('download_backup') }}" class="tab-data"
+           title="Save a timestamped copy of data/shop.db to your Downloads folder">Download Backup (.db)</a>
+        <a href="{{ url_for('export_customers_csv') }}" class="tab-data"
+           title="Customer due list as a spreadsheet file">Export Customers &amp; Dues (.csv)</a>
+      </div>
     </div>
   </header>
 

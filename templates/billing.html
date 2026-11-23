@@ -12,6 +12,21 @@
   </div>
 </section>
 
+<!-- Held receipts: unfinished bills parked in SQLite, restored on resume -->
+<section class="drafts-panel no-print" id="drafts-panel">
+  <div class="drafts-head">
+    <button type="button" class="drafts-toggle" id="drafts-toggle"
+            aria-expanded="true" aria-controls="drafts-list">
+      <span class="drafts-title">Held Receipts</span>
+      <span class="drafts-count" id="drafts-count">(0)</span>
+    </button>
+    <p class="small muted drafts-hint">
+      Parked bills stay in <code>shop.db</code> until you Save &amp; Print them — they never touch dues or Daily Sales.
+    </p>
+  </div>
+  <ul class="drafts-list" id="drafts-list"></ul>
+</section>
+
 <div class="billing-grid">
   <div class="stack">
     <!-- Customer -->
@@ -195,6 +210,14 @@
       Save &amp; Print Receipt
     </button>
     <p class="small muted center" id="save-status" role="status"></p>
+
+    <div class="hold-block">
+      <label for="draft-label">Hold this receipt (optional label)</label>
+      <input class="input" type="text" id="draft-label" maxlength="60"
+             placeholder="e.g. Karim Traders — big order" autocomplete="off">
+      <button type="button" class="btn btn-full" id="hold-receipt">Hold Receipt</button>
+      <p class="small muted center" id="hold-status" role="status"></p>
+    </div>
 
     <div class="divider"></div>
     <ul class="checklist small muted">
