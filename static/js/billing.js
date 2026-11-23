@@ -1074,6 +1074,10 @@
       setStatus("Customer name is required.", true);
       return;
     }
+    // Same guard as Save & Print: a second click or Enter while the first
+    // request is still in flight would add the customer twice.
+    if (form.dataset.busy === "1") return;
+    form.dataset.busy = "1";
     try {
       const customer = await createCustomer(payload);
       form.reset();
@@ -1082,6 +1086,8 @@
       el.savePrint.focus();
     } catch (err) {
       setStatus(err.message, true);
+    } finally {
+      delete form.dataset.busy;
     }
   });
 
