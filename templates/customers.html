@@ -12,6 +12,43 @@
   </div>
 </section>
 
+{% if pending_bills %}
+<section class="card card-pending">
+  <div class="card-head">
+    <h3>Pending daily bills</h3>
+    <span class="small muted">Weight-only pickups not yet priced</span>
+  </div>
+  <table class="data-table data-table-compact">
+    <thead>
+      <tr>
+        <th>Customer</th>
+        <th>Pickup day</th>
+        <th class="num">Pickups</th>
+        <th class="num">Weight (kg)</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in pending_bills %}
+      <tr>
+        <td>
+          <a class="link-strong" href="{{ url_for('customer_detail', customer_id=p.customer_id) }}#pending-pickups">
+            {{ p.name }}
+          </a>
+        </td>
+        <td>{{ p.picked_on }}</td>
+        <td class="num">{{ p.lines }}</td>
+        <td class="num">{{ '%.3f'|format(p.weight) }}</td>
+        <td class="actions">
+          <a class="btn btn-small" href="{{ url_for('customer_detail', customer_id=p.customer_id) }}#pending-pickups">Bill it</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
 <div class="layout-split">
   <section class="card">
     {% if customers %}
@@ -72,6 +109,12 @@
       <label>
         Shop address
         <input class="input" type="text" name="address" placeholder="Mirpur 10, Dhaka">
+      </label>
+      <label>
+        Opening / previous due ({{ CURRENCY }})
+        <input class="input" type="number" name="opening_due" step="0.01" min="0" value="0"
+               placeholder="0.00" title="Old unpaid balance from your paper ledger">
+        <span class="small muted">Only if the paper ledger already shows a due. No receipt is created.</span>
       </label>
       <button type="submit" class="btn btn-primary btn-full">Add customer</button>
     </form>

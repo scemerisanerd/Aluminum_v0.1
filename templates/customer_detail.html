@@ -36,6 +36,127 @@
 
 <div class="layout-split">
   <div class="stack">
+    {% if pending_days or cancelled_pickups %}
+    <section class="card" id="pending-pickups">
+      <h3>Unbilled daily pickups</h3>
+      <p class="small muted">
+        Goods handed over on weight-only challans. Nothing is billed and no due is added
+        until you generate the master receipt for that day. Cancel a wrong weight here —
+        it leaves the day's weight immediately.
+      </p>
+      {% for group in pending_days %}
+      <div class="history-block">
+        <div class="history-head">
+          <div>
+            <b>{{ group.day }}</b>
+            <span class="small muted">
+              • {{ group.rows|length }} pickup{{ '' if group.rows|length == 1 else 's' }}
+              • {{ '%.3f'|format(group.weight) }} kg
+            </span>
+          </div>
+        </div>
+        <table class="data-table data-table-compact">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Challan</th>
+              <th>Item</th>
+              <th class="num">Weight (kg)</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in group.rows %}
+            <tr>
+              <td class="small muted">{{ row.picked_at[11:16] }}</td>
+              <td class="small muted">
+                <a href="{{ url_for('challan', challan_no=row.challan_no) }}" target="_blank">
+                  #{{ '%05d'|format(row.challan_no) }}
+                </a>
+              </td>
+              <td>{{ row.product_name }}</td>
+              <td class="num">{{ '%.3f'|format(row.weight_kg) }}</td>
+              <td class="actions">
+                <form method="post" action="{{ url_for('cancel_pickup', pickup_id=row.id) }}"
+                      onsubmit="return confirm('Cancel this pickup? It stops counting in Daily Sales weight and is never billed.');">
+                  <button type="submit" class="btn btn-small btn-ghost btn-danger"
+                          title="Cancel this pickup">Cancel</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <form method="post"
+              action="{{ url_for('bill_pickups', customer_id=customer.id, day=group.day) }}"
+              class="master-bill stack">
+          <div class="form-grid">
+            <label>
+              Amount paid ({{ CURRENCY }})
+              <input class="input" type="number" name="paid" step="0.01" min="0" value="0.00">
+            </label>
+            <label>
+              Round-off ({{ CURRENCY }})
+              <input class="input" type="number" name="round_off" step="0.01" min="0" placeholder="0.00">
+            </label>
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">
+            Generate End-of-Day Master Receipt
+          </button>
+          <p class="small muted">
+            Merges the pickups above by product, prices them at this customer's special
+            rates (else the shop rate), adds the previous due, and prints both 80mm copies.
+          </p>
+        </form>
+      </div>
+      {% endfor %}
+
+      {% if cancelled_pickups %}
+      <div class="history-block">
+        <div class="history-head">
+          <div>
+            <b>Cancelled pickups</b>
+            <span class="small muted">
+              • kept for the record, in no bill and no Daily Sales weight
+            </span>
+          </div>
+        </div>
+        <table class="data-table data-table-compact">
+          <thead>
+            <tr>
+              <th>Cancelled</th>
+              <th>Challan</th>
+              <th>Item</th>
+              <th class="num">Weight (kg)</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in cancelled_pickups %}
+            <tr>
+              <td class="small muted">{{ row.cancelled_at[11:16] }}</td>
+              <td class="small muted">
+                <a href="{{ url_for('challan', challan_no=row.challan_no) }}" target="_blank">
+                  #{{ '%05d'|format(row.challan_no) }}
+                </a>
+              </td>
+              <td class="pickup-cancelled">{{ row.product_name }}</td>
+              <td class="num pickup-cancelled">{{ '%.3f'|format(row.weight_kg) }}</td>
+              <td class="actions">
+                <form method="post" action="{{ url_for('restore_pickup', pickup_id=row.id) }}">
+                  <button type="submit" class="btn btn-small btn-ghost"
+                          title="Undo the cancellation">Restore</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+
     <section class="card">
       <h3>Purchase history</h3>
       {% if sales %}
@@ -147,6 +268,26 @@
     </section>
     {% endif %}
 
+    {% if ledger_entries %}
+    <section class="card">
+      <h3>Previous ledger due</h3>
+      <table class="data-table data-table-compact">
+        <thead>
+          <tr><th>Date</th><th>Entry</th><th class="num">Amount</th></tr>
+        </thead>
+        <tbody>
+          {% for a in ledger_entries %}
+          <tr>
+            <td>{{ a.created_at }}</td>
+            <td class="muted">{{ a.note or 'Opening balance from physical ledger' }}</td>
+            <td class="num">{% if a.amount < 0 %}- {% endif %}{{ CURRENCY }} {{ a.amount|abs|money }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
+
     {% if payments %}
     <section class="card">
       <h3>Due payments received</h3>
@@ -204,6 +345,61 @@
         });
       })();
     </script>
+  </section>
+
+  <section class="card card-side">
+    <h3>Special product rates</h3>
+    <p class="small muted">
+      Custom Tk./kg prices for this customer. Leave a price blank to use the shop rate;
+      they apply automatically on every receipt and master bill.
+    </p>
+    <form method="post" action="{{ url_for('save_customer_rates', customer_id=customer.id) }}"
+          class="stack">
+      <div class="rates-scroll">
+        <table class="data-table data-table-compact">
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th class="num">Special rate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in products %}
+            <tr class="{{ 'is-special' if rates.get(p.id) is not none }}">
+              <td>
+                {{ p.name }}
+                <br><span class="small muted">Shop {{ CURRENCY }} {{ p.price_per_kg|money }}</span>
+              </td>
+              <td class="num">
+                <input class="input rate-input" type="number" step="0.01" min="0"
+                       name="rate_{{ p.id }}"
+                       value="{{ '%.2f'|format(rates[p.id]) if rates.get(p.id) is not none else '' }}"
+                       placeholder="{{ '%.2f'|format(p.price_per_kg) }}"
+                       aria-label="Special rate for {{ p.name }}">
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <button type="submit" class="btn btn-primary btn-full">Save special rates</button>
+    </form>
+  </section>
+
+  <section class="card card-side">
+    <h3>Add previous ledger due</h3>
+    <p class="small muted">Carry an old notebook balance onto this account. No bill, no weight, no Daily Sales.</p>
+    <form method="post" action="{{ url_for('add_opening_due', customer_id=customer.id) }}" class="stack">
+      <label>
+        Amount owed ({{ CURRENCY }})
+        <input class="input" type="number" name="amount" step="0.01" placeholder="0.00" required>
+      </label>
+      <label>
+        Note (optional)
+        <input class="input" type="text" name="note" placeholder="Old notebook balance, 2024">
+      </label>
+      <button type="submit" class="btn btn-primary btn-full">Add previous due</button>
+    </form>
   </section>
 
   <section class="card card-side">

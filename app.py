@@ -8,6 +8,7 @@ Run:  python app.py      (then open http://127.0.0.1:5000)
 import csv
 import io
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -98,7 +99,10 @@ CREATE TABLE IF NOT EXISTS sales (
     scrap_total      REAL NOT NULL DEFAULT 0,
         credit_used      REAL    NOT NULL DEFAULT 0,
     cash_applied     REAL    NOT NULL DEFAULT 0,
-    round_off        REAL    NOT NULL DEFAULT 0
+    round_off        REAL    NOT NULL DEFAULT 0,
+    -- 1 when this bill is an end-of-day master receipt built from challans.
+    -- Its weight was already counted on the day the goods were picked up.
+    pickup_billed    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS scrap_rates (
@@ -138,6 +142,44 @@ CREATE TABLE IF NOT EXISTS scrap_payments (
     created_at   TEXT    NOT NULL
 );
 
+-- A due carried over from the paper ledger. It changes what the customer owes
+-- and nothing else: no bill, no items, no weight, so Daily Sales stay clean.
+-- A positive amount adds due; a negative one corrects a mistake.
+CREATE TABLE IF NOT EXISTS ledger_adjustments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER NOT NULL REFERENCES customers(id),
+    amount      REAL    NOT NULL,
+    note        TEXT    DEFAULT '',
+    created_at  TEXT    NOT NULL
+);
+
+-- Special Tk./kg prices agreed with one customer. No row means the shop rate
+-- applies, so the table only ever holds genuine exceptions.
+CREATE TABLE IF NOT EXISTS customer_rates (
+    customer_id  INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    product_id   INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    price_per_kg REAL    NOT NULL CHECK (price_per_kg >= 0),
+    updated_at   TEXT    NOT NULL,
+    PRIMARY KEY (customer_id, product_id)
+);
+
+-- Goods that left the shop on a weight-only delivery slip (challan). Priced
+-- nothing, billed nothing: the rows wait here until the end-of-day master
+-- receipt turns them into one sale (`sale_id` is then set).
+CREATE TABLE IF NOT EXISTS pickups (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    challan_no    INTEGER NOT NULL,
+    customer_id   INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    product_id    INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    product_name  TEXT    NOT NULL,
+    weight_kg     REAL    NOT NULL CHECK (weight_kg > 0),
+    default_price REAL    NOT NULL DEFAULT 0,
+    picked_on     TEXT    NOT NULL,
+    picked_at     TEXT    NOT NULL,
+    sale_id       INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+    cancelled_at  TEXT
+);
+
 -- Unfinished receipts parked while the shop serves the next customer. A draft
 -- is not a sale: nothing here reaches customer due, the ledger or the Daily
 -- Sales figures until it is finalized with Save & Print.
@@ -165,6 +207,11 @@ CREATE INDEX IF NOT EXISTS idx_items_sale ON sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS idx_payments_customer ON payments(customer_id);
 CREATE INDEX IF NOT EXISTS idx_scrap_payments_customer
     ON scrap_payments(customer_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_adjustments_customer
+    ON ledger_adjustments(customer_id);
+CREATE INDEX IF NOT EXISTS idx_pickups_customer
+    ON pickups(customer_id, picked_on);
+CREATE INDEX IF NOT EXISTS idx_pickups_open ON pickups(sale_id);
 CREATE INDEX IF NOT EXISTS idx_drafts_updated ON draft_receipts(updated_at);
 """
 
@@ -189,6 +236,18 @@ SALE_CREDIT_COLUMNS = (
 # part of the bill instead of being carried as customer due.
 SALE_ROUND_OFF_COLUMNS = (
     ("round_off", "REAL NOT NULL DEFAULT 0"),
+)
+
+# A bill built from weight-only challans adds no weight of its own to Daily
+# Sales; this flags which bills those are.
+SALE_PICKUP_COLUMNS = (
+    ("pickup_billed", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+# A pickup voided before billing keeps its row for the audit trail but stops
+# counting everywhere: pending bills, master receipts and Daily Sales weight.
+PICKUP_CANCEL_COLUMNS = (
+    ("cancelled_at", "TEXT"),
 )
 
 SEED_PRODUCTS = [
@@ -276,7 +335,10 @@ def init_db():
     existing = {row[1] for row in con.execute("PRAGMA table_info(sales)")}
     added = set()
     for name, declaration in (
-        SALE_SCRAP_COLUMNS + SALE_CREDIT_COLUMNS + SALE_ROUND_OFF_COLUMNS
+        SALE_SCRAP_COLUMNS
+        + SALE_CREDIT_COLUMNS
+        + SALE_ROUND_OFF_COLUMNS
+        + SALE_PICKUP_COLUMNS
     ):
         if name not in existing:
             con.execute(f"ALTER TABLE sales ADD COLUMN {name} {declaration}")
@@ -288,6 +350,11 @@ def init_db():
             "UPDATE sales SET cash_applied ="
             " MAX(0, MIN(paid, grand_total - scrap_total))"
         )
+
+    pickup_columns = {row[1] for row in con.execute("PRAGMA table_info(pickups)")}
+    for name, declaration in PICKUP_CANCEL_COLUMNS:
+        if name not in pickup_columns:
+            con.execute(f"ALTER TABLE pickups ADD COLUMN {name} {declaration}")
 
     con.executemany(
         "INSERT OR IGNORE INTO scrap_rates (name, price_per_kg) VALUES (?, ?)",
@@ -419,6 +486,15 @@ def start_backup_thread():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def finite_number(value, default=None):
+    """A finite float from user input, or `default` for junk/infinity/NaN."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
 def money(value):
     """Format a number as 1,234.50 (currency is printed separately)."""
     try:
@@ -438,6 +514,7 @@ app.jinja_env.globals["SHOP"] = SHOP
 #
 # net = billed - cash kept at the till - scrap received - rounded-off leftovers
 #            - later cash payments - later scrap receipts
+#            + opening dues brought over from the paper ledger
 #
 # Positive net is money owed; negative net is credit on the account. Cash paid
 # beyond a bill is change handed back, so `cash_applied` (not the tender) is
@@ -451,8 +528,12 @@ NET_BALANCE_SQL = (
     " - COALESCE((SELECT SUM(round_off) FROM sales WHERE customer_id = {c}), 0)"
     " - COALESCE((SELECT SUM(amount) FROM payments WHERE customer_id = {c}), 0)"
     " - COALESCE((SELECT SUM(total) FROM scrap_payments"
+    "             WHERE customer_id = {c}), 0)"
+    " + COALESCE((SELECT SUM(amount) FROM ledger_adjustments"
     "             WHERE customer_id = {c}), 0))"
 )
+
+OPENING_DUE_NOTE = "Opening balance from physical ledger"
 
 
 def account_sql(customer_ref):
@@ -474,6 +555,20 @@ def customer_account(db, customer_id):
     }
 
 
+def add_ledger_adjustment(db, customer_id, amount, reason=""):
+    """Put an old paper-ledger balance on the account, with no bill behind it."""
+    db.execute(
+        "INSERT INTO ledger_adjustments (customer_id, amount, note, created_at)"
+        " VALUES (?, ?, ?, ?)",
+        (
+            customer_id,
+            round(amount, 2),
+            (reason or "").strip() or OPENING_DUE_NOTE,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+
+
 def customer_balance(db, customer_id):
     """Amount the customer owes right now (0 when they have credit)."""
     return customer_account(db, customer_id)["due"]
@@ -485,6 +580,27 @@ def scrap_rates(db):
         "SELECT name, price_per_kg FROM scrap_rates ORDER BY rowid"
     ).fetchall()
     return {row["name"]: row["price_per_kg"] for row in rows}
+
+
+def customer_rates(db, customer_id):
+    """Special Tk./kg prices for one customer, keyed by product id.
+
+    Only genuine exceptions are stored, so a missing key means "shop rate".
+    """
+    rows = db.execute(
+        "SELECT product_id, price_per_kg FROM customer_rates"
+        " WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchall()
+    return {row["product_id"]: row["price_per_kg"] for row in rows}
+
+
+def price_for(customer_prices, product):
+    """The customer's special rate for a product, else the shop rate."""
+    special = customer_prices.get(product["id"])
+    if special is None:
+        return round(float(product["price_per_kg"]), 2)
+    return round(float(special), 2)
 
 
 def load_customer(db, customer_id):
@@ -541,11 +657,22 @@ def customers():
     db = get_db()
     rows = customers_with_balances(db)
     total_due = round(sum(r["balance"] for r in rows), 2)
+    # Every customer/day with unbilled challan pickups: the "Pending Daily
+    # Bills" list. Nothing here is a sale yet.
+    pending_bills = db.execute(
+        "SELECT p.customer_id, p.picked_on, c.name, COUNT(*) AS lines,"
+        " SUM(p.weight_kg) AS weight"
+        " FROM pickups p JOIN customers c ON c.id = p.customer_id"
+        " WHERE p.sale_id IS NULL AND p.cancelled_at IS NULL"
+        " GROUP BY p.customer_id, p.picked_on"
+        " ORDER BY p.picked_on DESC, c.name COLLATE NOCASE"
+    ).fetchall()
     return render_template(
         "customers.html",
         active="customers",
         customers=rows,
         total_due=total_due,
+        pending_bills=pending_bills,
     )
 
 
@@ -572,27 +699,62 @@ def daily_summary():
         "SELECT COUNT(*) AS receipts,"
         " COALESCE(SUM(subtotal), 0) AS sales,"
         " COALESCE(SUM(cash_applied), 0) AS cash,"
-        " COALESCE(SUM(new_due), 0) AS due,"
+        # new_due is the running account balance, so it already contains the
+        # previous due; only the change it made today is due added today.
+        " COALESCE(SUM(new_due - previous_due), 0) AS due,"
         " COALESCE(SUM(scrap_total), 0) AS scrap"
         " FROM sales WHERE date(created_at) = ?",
         (day_iso,),
     ).fetchone()
 
-    # One row per product name (the name is snapshotted on each line, so a
-    # deleted product still shows up in its own past sales). `sort` is chosen
-    # from a fixed pair above, never taken from the URL as raw SQL.
-    order_column = "revenue" if sort == "revenue" else "weight"
-    products = db.execute(
+    # Weight is counted on the day the goods left the shop: a weight-only
+    # challan adds its kg on the pickup day, and the master receipt built from
+    # it adds no weight of its own, so no kilo is ever counted twice. Revenue
+    # lands on the day the master receipt is finalized.
+    billed = db.execute(
         "SELECT si.product_name,"
-        " SUM(si.weight_kg) AS weight,"
-        " SUM(si.line_total) AS revenue,"
-        " COUNT(DISTINCT si.sale_id) AS orders"
+        " SUM(CASE WHEN s.pickup_billed = 0 THEN si.weight_kg ELSE 0 END)"
+        "     AS weight,"
+        " SUM(si.line_total) AS revenue"
         " FROM sale_items si JOIN sales s ON s.id = si.sale_id"
         " WHERE date(s.created_at) = ?"
-        " GROUP BY si.product_name"
-        f" ORDER BY {order_column} DESC, si.product_name COLLATE NOCASE",
+        " GROUP BY si.product_name",
         (day_iso,),
     ).fetchall()
+    picked = db.execute(
+        "SELECT product_name, SUM(weight_kg) AS weight FROM pickups"
+        " WHERE picked_on = ? AND cancelled_at IS NULL GROUP BY product_name",
+        (day_iso,),
+    ).fetchall()
+
+    merged = {}
+    for row in billed:
+        merged[row["product_name"]] = {
+            "product_name": row["product_name"],
+            "weight": float(row["weight"] or 0),
+            "revenue": float(row["revenue"] or 0),
+        }
+    for row in picked:
+        entry = merged.setdefault(
+            row["product_name"],
+            {"product_name": row["product_name"], "weight": 0.0, "revenue": 0.0},
+        )
+        entry["weight"] += float(row["weight"] or 0)
+
+    products = [
+        {
+            "product_name": entry["product_name"],
+            "weight": round(entry["weight"], 3),
+            "revenue": round(entry["revenue"], 2),
+        }
+        for entry in merged.values()
+    ]
+    # `sort` is chosen from a fixed pair above, never raw SQL from the URL.
+    products.sort(key=lambda p: p["product_name"].lower())
+    products.sort(
+        key=lambda p: p["revenue" if sort == "revenue" else "weight"],
+        reverse=True,
+    )
 
     total_weight = round(sum(p["weight"] for p in products), 3)
     avg_bill = round(totals["sales"] / totals["receipts"], 2) if totals["receipts"] else 0.0
@@ -644,6 +806,39 @@ def customer_detail(customer_id):
         (customer_id,),
     ).fetchall()
 
+    ledger_entries = db.execute(
+        "SELECT * FROM ledger_adjustments WHERE customer_id = ? ORDER BY id DESC",
+        (customer_id,),
+    ).fetchall()
+
+    products = db.execute(
+        "SELECT id, name, category, price_per_kg FROM products"
+        " ORDER BY category, name COLLATE NOCASE"
+    ).fetchall()
+
+    # Unbilled challan pickups, grouped by the day they left the shop.
+    pending = db.execute(
+        "SELECT * FROM pickups WHERE customer_id = ? AND sale_id IS NULL"
+        " AND cancelled_at IS NULL"
+        " ORDER BY picked_on DESC, id",
+        (customer_id,),
+    ).fetchall()
+    pending_days = []
+    for row in pending:
+        if not pending_days or pending_days[-1]["day"] != row["picked_on"]:
+            pending_days.append({"day": row["picked_on"], "rows": [], "weight": 0.0})
+        pending_days[-1]["rows"].append(row)
+        pending_days[-1]["weight"] = round(
+            pending_days[-1]["weight"] + row["weight_kg"], 3
+        )
+
+    # Cancelled pickups stay on the ledger for the record, but count nowhere.
+    cancelled_pickups = db.execute(
+        "SELECT * FROM pickups WHERE customer_id = ? AND sale_id IS NULL"
+        " AND cancelled_at IS NOT NULL ORDER BY cancelled_at DESC, id DESC",
+        (customer_id,),
+    ).fetchall()
+
     account = customer_account(db, customer_id)
     return render_template(
         "customer_detail.html",
@@ -653,7 +848,12 @@ def customer_detail(customer_id):
         items_by_sale=items_by_sale,
         payments=payments,
         scrap_entries=scrap_entries,
+        ledger_entries=ledger_entries,
         scrap_rates=scrap_rates(db),
+        products=products,
+        rates=customer_rates(db, customer_id),
+        pending_days=pending_days,
+        cancelled_pickups=cancelled_pickups,
         balance=account["due"],
         credit=account["credit"],
         total_billed=sum(s["subtotal"] for s in sales),
@@ -736,6 +936,29 @@ def receipt(sale_id):
     )
 
 
+@app.route("/challan/<int:challan_no>")
+def challan(challan_no):
+    """80mm weight-only delivery slip: goods listed, no prices, no due."""
+    db = get_db()
+    items = db.execute(
+        "SELECT * FROM pickups WHERE challan_no = ? ORDER BY id", (challan_no,)
+    ).fetchall()
+    if not items:
+        abort(404)
+    customer = load_customer(db, items[0]["customer_id"])
+    live = [item for item in items if item["cancelled_at"] is None]
+    return render_template(
+        "challan.html",
+        customer=customer,
+        items=items,
+        challan_no=challan_no,
+        total_weight=round(sum(item["weight_kg"] for item in live), 3),
+        all_cancelled=not live,
+        picked_at=items[0]["picked_at"],
+        autoprint=request.args.get("print") == "1",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Product actions
 # ---------------------------------------------------------------------------
@@ -743,10 +966,8 @@ def receipt(sale_id):
 def add_product():
     name = (request.form.get("name") or "").strip()
     category = (request.form.get("category") or "").strip() or "Uncategorised"
-    try:
-        price = round(float(request.form.get("price_per_kg") or 0), 2)
-    except ValueError:
-        price = -1
+    price = finite_number(request.form.get("price_per_kg"))
+    price = -1 if price is None else round(price, 2)
 
     if not name or price < 0:
         note("Enter a product name and a price of 0 or more.", "error")
@@ -773,10 +994,8 @@ def update_price(product_id):
     ).fetchone()
     if product is None:
         abort(404)
-    try:
-        price = round(float(request.form.get("price_per_kg") or 0), 2)
-    except ValueError:
-        price = -1
+    price = finite_number(request.form.get("price_per_kg"))
+    price = -1 if price is None else round(price, 2)
     if price < 0:
         note("Price must be 0 or more.", "error")
         return redirect(url_for("products"))
@@ -796,10 +1015,8 @@ def update_scrap_rates():
         field = f"rate_{name.lower()}"
         if field not in request.form:
             continue
-        try:
-            price = round(float(request.form.get(field) or 0), 2)
-        except ValueError:
-            price = -1
+        price = finite_number(request.form.get(field))
+        price = -1 if price is None else round(price, 2)
         if price < 0:
             note(f'Price for {name} scrap must be 0 or more.', "error")
             return redirect(url_for("products"))
@@ -855,9 +1072,229 @@ def add_customer_form():
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
+    opening = round(finite_number(request.form.get("opening_due"), 0), 2)
+    if opening:
+        add_ledger_adjustment(db, cur.lastrowid, opening)
     db.commit()
     note(f'Customer "{name}" added.')
+    if opening > 0:
+        note(
+            f"Opening due of {CURRENCY} {money(opening)} carried onto the account."
+        )
     return redirect(url_for("customer_detail", customer_id=cur.lastrowid))
+
+
+@app.post("/customers/<int:customer_id>/opening-due")
+def add_opening_due(customer_id):
+    """Carry an old paper-ledger balance onto an existing customer."""
+    db = get_db()
+    customer = load_customer(db, customer_id)
+    if customer is None:
+        abort(404)
+
+    amount = round(finite_number(request.form.get("amount"), 0), 2)
+    if amount == 0:
+        note("Enter the amount owed in the old ledger.", "error")
+        return redirect(url_for("customer_detail", customer_id=customer_id))
+
+    add_ledger_adjustment(
+        db, customer_id, amount, request.form.get("note") or ""
+    )
+    db.commit()
+    note(
+        f"Previous due of {CURRENCY} {money(amount)} added to "
+        f"{customer['name']}. Current due: "
+        f"{CURRENCY} {money(customer_balance(db, customer_id))}."
+    )
+    create_backup()
+    return redirect(url_for("customer_detail", customer_id=customer_id))
+
+
+@app.post("/customers/<int:customer_id>/rates")
+def save_customer_rates(customer_id):
+    """Save the special Tk./kg prices for one customer. Blank = shop rate."""
+    db = get_db()
+    customer = load_customer(db, customer_id)
+    if customer is None:
+        abort(404)
+
+    # Validate everything before writing, so a bad row saves nothing at all.
+    updates = []
+    clears = []
+    for product in db.execute("SELECT id FROM products"):
+        field = f"rate_{product['id']}"
+        if field not in request.form:
+            continue
+        raw = (request.form.get(field) or "").strip()
+        if not raw:
+            clears.append((customer_id, product["id"]))
+            continue
+        price = finite_number(raw)
+        if price is None or price < 0:
+            note("Special rates must be a number of 0 or more.", "error")
+            return redirect(url_for("customer_detail", customer_id=customer_id))
+        updates.append((customer_id, product["id"], round(price, 2)))
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    db.executemany(
+        "DELETE FROM customer_rates WHERE customer_id = ? AND product_id = ?",
+        clears,
+    )
+    db.executemany(
+        "INSERT INTO customer_rates (customer_id, product_id, price_per_kg,"
+        " updated_at) VALUES (?, ?, ?, ?)"
+        " ON CONFLICT(customer_id, product_id) DO UPDATE SET"
+        " price_per_kg = excluded.price_per_kg,"
+        " updated_at = excluded.updated_at",
+        [(cid, pid, price, now) for cid, pid, price in updates],
+    )
+    db.commit()
+    note(
+        f"Special rates saved for {customer['name']}: {len(updates)} product"
+        f"{'' if len(updates) == 1 else 's'}. Blank prices use the shop rate."
+    )
+    return redirect(url_for("customer_detail", customer_id=customer_id))
+
+
+@app.post("/pickups/<int:pickup_id>/cancel")
+def cancel_pickup(pickup_id):
+    """Void a mistaken weight-only pickup before it is billed.
+
+    The row is kept (struck through on the ledger) so the shop can see what was
+    voided, but it stops counting in pending bills, master receipts and Daily
+    Sales weight.
+    """
+    db = get_db()
+    row = db.execute("SELECT * FROM pickups WHERE id = ?", (pickup_id,)).fetchone()
+    if row is None:
+        abort(404)
+    back = url_for("customer_detail", customer_id=row["customer_id"])
+    back += "#pending-pickups"
+    if row["sale_id"] is not None:
+        note("That pickup is already on a bill and cannot be cancelled.", "error")
+        return redirect(back)
+    if row["cancelled_at"] is not None:
+        note("That pickup was already cancelled.", "error")
+        return redirect(back)
+    db.execute(
+        "UPDATE pickups SET cancelled_at = ?"
+        " WHERE id = ? AND sale_id IS NULL AND cancelled_at IS NULL",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pickup_id),
+    )
+    db.commit()
+    note(
+        f"Challan #{row['challan_no']:05d} cancelled: {row['product_name']} "
+        f"{row['weight_kg']:.3f} kg no longer counts in the day's weight."
+    )
+    return redirect(back)
+
+
+@app.post("/pickups/<int:pickup_id>/restore")
+def restore_pickup(pickup_id):
+    """Undo a cancellation while the pickup is still unbilled."""
+    db = get_db()
+    row = db.execute("SELECT * FROM pickups WHERE id = ?", (pickup_id,)).fetchone()
+    if row is None:
+        abort(404)
+    back = url_for("customer_detail", customer_id=row["customer_id"])
+    back += "#pending-pickups"
+    if row["sale_id"] is not None or row["cancelled_at"] is None:
+        note("That pickup is not a cancelled, unbilled pickup.", "error")
+        return redirect(back)
+    db.execute(
+        "UPDATE pickups SET cancelled_at = NULL WHERE id = ? AND sale_id IS NULL",
+        (pickup_id,),
+    )
+    db.commit()
+    note(
+        f"Challan #{row['challan_no']:05d} restored: {row['product_name']} "
+        f"{row['weight_kg']:.3f} kg counts again."
+    )
+    return redirect(back)
+
+
+@app.post("/customers/<int:customer_id>/pickups/<day>/bill")
+def bill_pickups(customer_id, day):
+    """End-of-day master receipt: one day's unbilled pickups become one bill."""
+    db = get_db()
+    customer = load_customer(db, customer_id)
+    if customer is None:
+        abort(404)
+    try:
+        picked_on = datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        abort(404)
+
+    rows = db.execute(
+        "SELECT * FROM pickups WHERE customer_id = ? AND picked_on = ?"
+        " AND sale_id IS NULL AND cancelled_at IS NULL"
+        " ORDER BY product_name COLLATE NOCASE, id",
+        (customer_id, picked_on),
+    ).fetchall()
+    if not rows:
+        note("There are no unbilled pickups for that day.", "error")
+        return redirect(url_for("customer_detail", customer_id=customer_id))
+
+    paid = round(finite_number(request.form.get("paid"), 0), 2)
+    round_off = round(finite_number(request.form.get("round_off"), 0), 2)
+    if paid < 0 or round_off < 0:
+        note("Amount paid and round-off cannot be negative.", "error")
+        return redirect(url_for("customer_detail", customer_id=customer_id))
+
+    # Same weight in one line per product, priced at this customer's special
+    # rates. A deleted product falls back to the price snapshotted at pickup.
+    special = customer_rates(db, customer_id)
+    merged = {}
+    for row in rows:
+        key = (row["product_id"], row["product_name"])
+        line = merged.get(key)
+        if line is None:
+            price = special.get(row["product_id"])
+            if price is None:
+                product = (
+                    db.execute(
+                        "SELECT price_per_kg FROM products WHERE id = ?",
+                        (row["product_id"],),
+                    ).fetchone()
+                    if row["product_id"]
+                    else None
+                )
+                price = (
+                    product["price_per_kg"] if product else row["default_price"]
+                )
+            line = merged[key] = {
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "weight_kg": 0.0,
+                "price_per_kg": round(float(price or 0), 2),
+            }
+        line["weight_kg"] = round(line["weight_kg"] + row["weight_kg"], 3)
+
+    lines = []
+    for line in merged.values():
+        line["line_total"] = round(line["weight_kg"] * line["price_per_kg"], 2)
+        lines.append(line)
+
+    result = record_sale(
+        db,
+        customer_id,
+        lines,
+        paid,
+        round_off,
+        pickup_billed=True,
+        pickup_ids=[row["id"] for row in rows],
+    )
+    if result.get("error"):
+        note(result["error"], "error")
+        return redirect(url_for("customer_detail", customer_id=customer_id))
+
+    note(
+        f"Master receipt {result['sale_id']:05d} for {customer['name']}: "
+        f"{len(rows)} pickup{'' if len(rows) == 1 else 's'} billed "
+        f"{CURRENCY} {money(result['subtotal'])}. Due now "
+        f"{CURRENCY} {money(customer_balance(db, customer_id))}."
+    )
+    return redirect(url_for("receipt", sale_id=result["sale_id"], print=1))
 
 
 @app.post("/customers/<int:customer_id>/payments")
@@ -866,10 +1303,7 @@ def record_payment(customer_id):
     customer = load_customer(db, customer_id)
     if customer is None:
         abort(404)
-    try:
-        amount = round(float(request.form.get("amount") or 0), 2)
-    except ValueError:
-        amount = 0
+    amount = round(finite_number(request.form.get("amount"), 0), 2)
 
     if amount <= 0:
         note("Enter a payment amount greater than 0.", "error")
@@ -924,10 +1358,8 @@ def record_scrap_payment(customer_id):
     rates = scrap_rates(db)
     kg = {}
     for name in SCRAP_TYPES:
-        try:
-            weight = round(float(request.form.get(f"{name.lower()}_kg") or 0), 3)
-        except ValueError:
-            weight = -1
+        weight = finite_number(request.form.get(f"{name.lower()}_kg"))
+        weight = -1 if weight is None else round(weight, 3)
         if weight < 0:
             note(f"{name} scrap weight must be 0 or more.", "error")
             return redirect(url_for("customer_detail", customer_id=customer_id))
@@ -1025,6 +1457,7 @@ def api_customer(customer_id):
     account = customer_account(db, customer_id)
     data["balance"] = account["due"]
     data["credit"] = account["credit"]
+    data["rates"] = customer_rates(db, customer_id)
     return jsonify(data)
 
 
@@ -1047,11 +1480,105 @@ def api_customer_create():
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
+    opening = round(finite_number(payload.get("opening_due"), 0), 2)
+    if opening:
+        add_ledger_adjustment(db, cur.lastrowid, opening)
     db.commit()
     data = dict(load_customer(db, cur.lastrowid))
-    data["balance"] = 0.0
-    data["credit"] = 0.0
+    account = customer_account(db, cur.lastrowid)
+    data["balance"] = account["due"]
+    data["credit"] = account["credit"]
     return jsonify(data), 201
+
+
+@app.post("/api/challans")
+def api_create_challan():
+    """Weight-only slip: log what left the shop, bill nothing yet."""
+    payload = request.get_json(silent=True) or {}
+    customer_id = payload.get("customer_id")
+    raw_items = payload.get("items") or []
+    if not customer_id:
+        return jsonify({"error": "Select or create a customer first."}), 400
+    if not raw_items:
+        return jsonify({"error": "Add at least one product line."}), 400
+
+    db = get_db()
+    customer = load_customer(db, customer_id)
+    if customer is None:
+        return jsonify({"error": "Customer not found."}), 400
+
+    items = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            return jsonify({"error": "Every line needs a product and a weight."}), 400
+        try:
+            product_id = int(raw.get("product_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Every line needs a product and a weight."}), 400
+        weight = finite_number(raw.get("weight_kg"))
+        if weight is None or round(weight, 3) <= 0:
+            return jsonify({"error": "Weight must be greater than 0 kg."}), 400
+        product = db.execute(
+            "SELECT id, name, price_per_kg FROM products WHERE id = ?",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            return jsonify({"error": "A selected product no longer exists."}), 400
+        items.append(
+            {
+                "product_id": product["id"],
+                "product_name": product["name"],
+                "weight_kg": round(weight, 3),
+                "default_price": round(float(product["price_per_kg"]), 2),
+            }
+        )
+
+    now = datetime.now()
+    picked_on = now.strftime("%Y-%m-%d")
+    picked_at = now.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        # Next slip number, read inside the write transaction so two slips can
+        # never share a number.
+        challan_no = db.execute(
+            "SELECT COALESCE(MAX(challan_no), 0) + 1 AS next FROM pickups"
+        ).fetchone()["next"]
+        db.executemany(
+            "INSERT INTO pickups (challan_no, customer_id, product_id,"
+            " product_name, weight_kg, default_price, picked_on, picked_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    challan_no,
+                    customer_id,
+                    item["product_id"],
+                    item["product_name"],
+                    item["weight_kg"],
+                    item["default_price"],
+                    picked_on,
+                    picked_at,
+                )
+                for item in items
+            ],
+        )
+        db.commit()
+    except sqlite3.Error as exc:
+        db.rollback()
+        return jsonify({"error": f"Could not save the slip: {exc}"}), 500
+
+    return (
+        jsonify(
+            {
+                "challan_no": challan_no,
+                "challan_url": url_for("challan", challan_no=challan_no),
+                "total_weight": round(
+                    sum(item["weight_kg"] for item in items), 3
+                ),
+                "picked_on": picked_on,
+            }
+        ),
+        201,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1063,24 +1590,39 @@ DRAFT_LABEL_MAX = 60
 
 
 def draft_line_items(db, raw_items):
-    """Lines for a draft, always priced from the database, never the browser."""
+    """Lines for a draft, always priced from the database, never the browser.
+
+    Returns (items, error). A line with only some of its fields filled in is
+    reported, never quietly dropped, so holding cannot lose part of a bill.
+    Fully blank lines are ignored.
+    """
     items = []
     for raw in raw_items or []:
         if not isinstance(raw, dict):
             continue
+        product_raw = raw.get("product_id")
+        weight_raw = raw.get("weight_kg")
+        if product_raw in (None, "") and weight_raw in (None, ""):
+            continue
         try:
-            product_id = int(raw.get("product_id"))
-            weight = round(float(raw.get("weight_kg")), 3)
+            product_id = int(product_raw)
         except (TypeError, ValueError):
-            continue
+            return None, "Every line needs a product. Pick one or remove the line."
+        weight = finite_number(weight_raw)
+        if weight is None:
+            return None, "Every line needs a weight in kg. Enter it or remove the line."
+        weight = round(weight, 3)
         if weight <= 0:
-            continue
+            return None, "Weight must be greater than 0 kg. Fix the line or remove it."
         product = db.execute(
             "SELECT id, name, price_per_kg FROM products WHERE id = ?",
             (product_id,),
         ).fetchone()
         if product is None:
-            continue
+            return None, (
+                "A product on this receipt no longer exists."
+                " Pick another product or remove the line."
+            )
         items.append(
             {
                 "product_id": product["id"],
@@ -1090,7 +1632,7 @@ def draft_line_items(db, raw_items):
                 "line_total": round(weight * product["price_per_kg"], 2),
             }
         )
-    return items
+    return items, None
 
 
 def draft_items(row):
@@ -1165,7 +1707,9 @@ def api_draft_save():
     if customer_id and load_customer(db, customer_id) is None:
         customer_id = None
 
-    items = draft_line_items(db, payload.get("items"))
+    items, error = draft_line_items(db, payload.get("items"))
+    if error:
+        return jsonify({"error": error}), 400
     if not items:
         return jsonify(
             {"error": "Add at least one product line before holding the receipt."}
@@ -1183,16 +1727,10 @@ def api_draft_save():
         label = (text_field("name") or "Held receipt")[:DRAFT_LABEL_MAX]
 
     def amount(value):
-        try:
-            return max(0.0, round(float(value or 0), 2))
-        except (TypeError, ValueError):
-            return 0.0
+        return max(0.0, round(finite_number(value, 0.0), 2))
 
     def kilos(value):
-        try:
-            return max(0.0, round(float(value or 0), 3))
-        except (TypeError, ValueError):
-            return 0.0
+        return max(0.0, round(finite_number(value, 0.0), 3))
 
     scrap = payload.get("scrap") or {}
     if not isinstance(scrap, dict):
@@ -1263,88 +1801,29 @@ def api_draft_delete(draft_id):
     return jsonify({"deleted": draft_id})
 
 
-@app.post("/api/sales")
-def api_create_sale():
-    payload = request.get_json(silent=True) or {}
-    customer_id = payload.get("customer_id")
-    raw_items = payload.get("items") or []
+def record_sale(
+    db,
+    customer_id,
+    lines,
+    paid,
+    requested_round_off,
+    scrap=None,
+    draft_id=0,
+    pickup_billed=False,
+    pickup_ids=(),
+):
+    """Write one bill and its lines: the single place the due math lives.
 
-    # A receipt resumed from a held draft carries its draft id, so finalizing
-    # it can drop the draft in the same transaction.
-    try:
-        draft_id = int(payload.get("draft_id") or 0)
-    except (TypeError, ValueError):
-        draft_id = 0
-
-    try:
-        paid = round(float(payload.get("paid") or 0), 2)
-    except (TypeError, ValueError):
-        return jsonify({"error": "Amount paid must be a number."}), 400
-    try:
-        requested_round_off = round(float(payload.get("round_off") or 0), 2)
-    except (TypeError, ValueError):
-        return jsonify({"error": "Round-off amount must be a number."}), 400
-    if requested_round_off < 0:
-        return jsonify({"error": "Round-off amount cannot be negative."}), 400
-
-    if not customer_id:
-        return jsonify({"error": "Select or create a customer first."}), 400
-    if paid < 0:
-        return jsonify({"error": "Amount paid cannot be negative."}), 400
-    if not raw_items:
-        return jsonify({"error": "Add at least one product line."}), 400
-
-    db = get_db()
-    customer = load_customer(db, customer_id)
-    if customer is None:
-        return jsonify({"error": "Customer not found."}), 400
-
-    # Scrap is valued at the rates stored in the database, never at a price
-    # the browser sends, and it counts as payment towards the bill.
-    rates = scrap_rates(db)
-    raw_scrap = payload.get("scrap") or {}
-    scrap = {}
-    for name in SCRAP_TYPES:
-        field = f"{name.lower()}_kg"
-        try:
-            kg = round(float(raw_scrap.get(field) or 0), 3)
-        except (TypeError, ValueError):
-            return jsonify({"error": f"{name} scrap weight must be a number."}), 400
-        if kg < 0:
-            return jsonify({"error": f"{name} scrap weight cannot be negative."}), 400
-        rate = round(float(rates.get(name, 0)), 2)
-        scrap[name] = {"kg": kg, "rate": rate, "value": round(kg * rate, 2)}
-    scrap_total = round(sum(part["value"] for part in scrap.values()), 2)
-
-    # Rebuild the lines from current database prices - never trust client totals.
-    lines = []
-    for raw in raw_items:
-        try:
-            product_id = int(raw.get("product_id"))
-            weight = round(float(raw.get("weight_kg")), 3)
-        except (TypeError, ValueError, AttributeError):
-            return jsonify({"error": "Every line needs a product and a weight."}), 400
-        if weight <= 0:
-            return jsonify({"error": "Weight must be greater than 0 kg."}), 400
-
-        product = db.execute(
-            "SELECT * FROM products WHERE id = ?", (product_id,)
-        ).fetchone()
-        if product is None:
-            return jsonify({"error": "A selected product no longer exists."}), 400
-
-        line_total = round(weight * product["price_per_kg"], 2)
-        lines.append(
-            {
-                "product_id": product["id"],
-                "product_name": product["name"],
-                "weight_kg": weight,
-                "price_per_kg": product["price_per_kg"],
-                "line_total": line_total,
-            }
-        )
-
+    Save & Print and the end-of-day master receipt both come through here, so
+    previous due, credit on account, scrap, round-off and change behave the
+    same. Returns the saved figures, or {"error": ...} if SQLite refuses.
+    """
+    scrap = scrap or {}
     subtotal = round(sum(line["line_total"] for line in lines), 2)
+    scrap_total = round(
+        sum(float(part.get("value") or 0) for part in scrap.values()), 2
+    )
+
     account = customer_account(db, customer_id)
     previous_due = account["due"]
     credit_before = account["credit"]
@@ -1364,9 +1843,12 @@ def api_create_sale():
     remainder = round(cash_needed - cash_applied, 2)
     # A small leftover the shop chooses to waive is settled on this bill: it is
     # never allowed to exceed the real remainder and never becomes customer due.
-    round_off = round(min(requested_round_off, remainder), 2)
+    round_off = round(min(max(0.0, requested_round_off), remainder), 2)
     new_due = round(remainder - round_off, 2)
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    black = scrap.get("Black", {})
+    white = scrap.get("White", {})
 
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -1374,12 +1856,13 @@ def api_create_sale():
             "INSERT INTO sales (customer_id, subtotal, previous_due, grand_total,"
             " paid, new_due, created_at, scrap_black_kg, scrap_white_kg,"
             " scrap_black_rate, scrap_white_rate, scrap_total,"
-            " credit_used, cash_applied, round_off)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " credit_used, cash_applied, round_off, pickup_billed)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (customer_id, subtotal, previous_due, grand_total, paid, new_due,
-             created_at, scrap["Black"]["kg"], scrap["White"]["kg"],
-             scrap["Black"]["rate"], scrap["White"]["rate"], scrap_total,
-             credit_used, cash_applied, round_off),
+             created_at, black.get("kg", 0), white.get("kg", 0),
+             black.get("rate", 0), white.get("rate", 0), scrap_total,
+             credit_used, cash_applied, round_off,
+             1 if pickup_billed else 0),
         )
         sale_id = cur.lastrowid
         db.executemany(
@@ -1400,38 +1883,141 @@ def api_create_sale():
         # A finalized draft stops being a draft in the same transaction.
         if draft_id:
             db.execute("DELETE FROM draft_receipts WHERE id = ?", (draft_id,))
+        # The challans this bill covers stop being unbilled right here.
+        if pickup_ids:
+            marks = ",".join("?" * len(pickup_ids))
+            db.execute(
+                f"UPDATE pickups SET sale_id = ? WHERE id IN ({marks})",
+                (sale_id, *pickup_ids),
+            )
         db.commit()
     except sqlite3.Error as exc:
         db.rollback()
-        return jsonify({"error": f"Could not save the sale: {exc}"}), 500
+        return {"error": f"Could not save the sale: {exc}"}
 
     # Snapshot right after a receipt is saved, at most once an hour.
     create_backup()
 
-    return (
-        jsonify(
+    return {
+        "sale_id": sale_id,
+        "receipt_url": url_for("receipt", sale_id=sale_id),
+        "subtotal": subtotal,
+        "previous_due": previous_due,
+        "grand_total": grand_total,
+        "paid": paid,
+        "scrap_total": scrap_total,
+        "new_due": new_due,
+        "remainder": remainder,
+        "round_off": round_off,
+        "credit_used": credit_used,
+        "cash_applied": cash_applied,
+        "scrap_credit": scrap_credit,
+        "change": change,
+        "credit_after": round(credit_before - credit_used + scrap_credit, 2),
+    }
+
+
+@app.post("/api/sales")
+def api_create_sale():
+    payload = request.get_json(silent=True) or {}
+    customer_id = payload.get("customer_id")
+    raw_items = payload.get("items") or []
+
+    # A receipt resumed from a held draft carries its draft id, so finalizing
+    # it can drop the draft in the same transaction.
+    try:
+        draft_id = int(payload.get("draft_id") or 0)
+    except (TypeError, ValueError):
+        draft_id = 0
+
+    paid = finite_number(payload.get("paid") or 0)
+    if paid is None:
+        return jsonify({"error": "Amount paid must be a number."}), 400
+    paid = round(paid, 2)
+    requested_round_off = finite_number(payload.get("round_off") or 0)
+    if requested_round_off is None:
+        return jsonify({"error": "Round-off amount must be a number."}), 400
+    requested_round_off = round(requested_round_off, 2)
+    if requested_round_off < 0:
+        return jsonify({"error": "Round-off amount cannot be negative."}), 400
+
+    if not customer_id:
+        return jsonify({"error": "Select or create a customer first."}), 400
+    if paid < 0:
+        return jsonify({"error": "Amount paid cannot be negative."}), 400
+    if not raw_items:
+        return jsonify({"error": "Add at least one product line."}), 400
+
+    db = get_db()
+    customer = load_customer(db, customer_id)
+    if customer is None:
+        return jsonify({"error": "Customer not found."}), 400
+
+    # Scrap is valued at the rates stored in the database, never at a price
+    # the browser sends, and it counts as payment towards the bill.
+    rates = scrap_rates(db)
+    raw_scrap = payload.get("scrap") or {}
+    if not isinstance(raw_scrap, dict):
+        return jsonify({"error": "Scrap weights must be numbers."}), 400
+    scrap = {}
+    for name in SCRAP_TYPES:
+        field = f"{name.lower()}_kg"
+        kg = finite_number(raw_scrap.get(field) or 0)
+        if kg is None:
+            return jsonify({"error": f"{name} scrap weight must be a number."}), 400
+        kg = round(kg, 3)
+        if kg < 0:
+            return jsonify({"error": f"{name} scrap weight cannot be negative."}), 400
+        rate = round(float(rates.get(name, 0)), 2)
+        scrap[name] = {"kg": kg, "rate": rate, "value": round(kg * rate, 2)}
+
+    # Rebuild the lines from this customer's special rates, else the shop
+    # prices - never trust client totals or client prices.
+    special_rates = customer_rates(db, customer_id)
+    lines = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            return jsonify({"error": "Every line needs a product and a weight."}), 400
+        try:
+            product_id = int(raw.get("product_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Every line needs a product and a weight."}), 400
+        weight = finite_number(raw.get("weight_kg"))
+        if weight is None:
+            return jsonify({"error": "Every line needs a product and a weight."}), 400
+        weight = round(weight, 3)
+        if weight <= 0:
+            return jsonify({"error": "Weight must be greater than 0 kg."}), 400
+
+        product = db.execute(
+            "SELECT * FROM products WHERE id = ?", (product_id,)
+        ).fetchone()
+        if product is None:
+            return jsonify({"error": "A selected product no longer exists."}), 400
+
+        price = price_for(special_rates, product)
+        lines.append(
             {
-                "sale_id": sale_id,
-                "receipt_url": url_for("receipt", sale_id=sale_id),
-                "subtotal": subtotal,
-                "previous_due": previous_due,
-                "grand_total": grand_total,
-                "paid": paid,
-                "scrap_total": scrap_total,
-                "new_due": new_due,
-                "remainder": remainder,
-                "round_off": round_off,
-                "credit_used": credit_used,
-                "cash_applied": cash_applied,
-                "scrap_credit": scrap_credit,
-                "change": change,
-                "credit_after": round(
-                    credit_before - credit_used + scrap_credit, 2
-                ),
+                "product_id": product["id"],
+                "product_name": product["name"],
+                "weight_kg": weight,
+                "price_per_kg": price,
+                "line_total": round(weight * price, 2),
             }
-        ),
-        201,
+        )
+
+    result = record_sale(
+        db,
+        customer_id,
+        lines,
+        paid,
+        requested_round_off,
+        scrap=scrap,
+        draft_id=draft_id,
     )
+    if result.get("error"):
+        return jsonify({"error": result["error"]}), 500
+    return jsonify(result), 201
 
 
 @app.errorhandler(404)

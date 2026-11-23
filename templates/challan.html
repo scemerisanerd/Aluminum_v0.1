@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Challan #{{ '%05d'|format(challan_no) }} — {{ SHOP.name }}</title>
+  <style>
+    /* 80mm thermal delivery slip: weights only, never a price. */
+    @page { size: 80mm auto; margin: 0mm; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #eef0f4;
+      color: #000;
+      font-family: "Courier New", "Consolas", monospace;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .sheet { width: 80mm; margin: 0 auto; background: #fff; }
+    .slip { width: 80mm; padding: 3mm 3mm 5mm; }
+    .copy-banner {
+      text-align: center; font-weight: 700; font-size: 9pt;
+      letter-spacing: .08em; border: 1px dashed #000; padding: 1mm;
+      margin-bottom: 2mm;
+    }
+    h1 { font-size: 12pt; text-align: center; margin: 2mm 0 0; letter-spacing: .02em; }
+    .shop-line { text-align: center; font-size: 9pt; margin: 0.5mm 0 0; }
+    .rule { border-top: 1px dashed #000; margin: 2mm 0; }
+    .meta div { display: flex; justify-content: space-between; gap: 4mm; font-size: 10pt; }
+    .meta span { white-space: nowrap; }
+    .meta b { font-weight: 700; text-align: right; }
+    table { width: 100%; border-collapse: collapse; font-size: 10pt; }
+    th {
+      text-align: left; font-size: 8.5pt; text-transform: uppercase;
+      letter-spacing: .04em; border-bottom: 1px solid #000; padding: 1mm 0;
+    }
+    td { padding: 1mm 0; border-bottom: 1px dotted #000; vertical-align: top; }
+    .num { text-align: right; white-space: nowrap; }
+    .total {
+      display: flex; justify-content: space-between; font-weight: 700;
+      font-size: 11pt; border-top: 1px solid #000; padding-top: 1mm; margin-top: 2mm;
+    }
+    .note { font-size: 8.5pt; margin: 2mm 0 0; line-height: 1.35; }
+    .void { font-weight: 700; }
+    .struck { text-decoration: line-through; }
+    .tear { border-top: 1px dashed #000; margin: 0 3mm; }
+    .foot { text-align: center; font-size: 8pt; margin: 2mm 0 0; }
+    .toolbar {
+      width: 80mm; margin: 10mm auto 4mm; display: flex; gap: 8px;
+      justify-content: center; font-family: system-ui, sans-serif;
+    }
+    .toolbar a, .toolbar button {
+      font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 8px;
+      border: 1px solid #c9ccd3; background: #fff; color: #111827;
+      text-decoration: none; cursor: pointer;
+    }
+    .toolbar button { background: #0f62fe; border-color: #0f62fe; color: #fff; }
+    @media print {
+      body { background: #fff; }
+      .sheet { width: auto; }
+      .slip { padding: 2mm 2mm 4mm; }
+      .toolbar { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+{% macro slip(copy_label) %}
+<section class="slip">
+  <div class="copy-banner">{{ copy_label }}</div>
+  {% if all_cancelled %}
+  <div class="copy-banner">*** CANCELLED — DO NOT BILL ***</div>
+  {% endif %}
+
+  <h1>{{ SHOP.name }}</h1>
+  <p class="shop-line">{{ SHOP.tagline }} • {{ SHOP.phone }}</p>
+
+  <div class="rule"></div>
+
+  <div class="meta">
+    <div><span>Customer</span><b>{{ customer.name if customer else '—' }}</b></div>
+    <div><span>Shop</span><b>{{ customer.shop_name or '—' if customer else '—' }}</b></div>
+    <div><span>Date</span><b>{{ picked_at[:16] }}</b></div>
+    <div><span>Challan</span><b>#{{ '%05d'|format(challan_no) }}</b></div>
+  </div>
+
+  <div class="rule"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Item</th>
+        <th class="num">Weight (kg)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td class="{{ 'struck' if item.cancelled_at else '' }}">
+          {{ item.product_name }}
+          {% if item.cancelled_at %}<span class="void">(cancelled)</span>{% endif %}
+        </td>
+        <td class="num{{ ' struck' if item.cancelled_at else '' }}">
+          {{ '%.3f'|format(item.weight_kg) }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="total">
+    <span>Total weight</span>
+    <span>{{ '%.3f'|format(total_weight) }} kg</span>
+  </div>
+
+  {% if all_cancelled %}
+  <p class="note void">This slip is cancelled in full and is not billed.</p>
+  {% else %}
+  <p class="note">Goods delivered on weight only. Prices and dues are settled on the end-of-day bill.</p>
+  {% endif %}
+  <div class="rule"></div>
+  <p class="foot">Received the goods above in good condition.</p>
+  <p class="foot">Signature: ______________________</p>
+</section>
+{% endmacro %}
+
+<div class="toolbar no-print">
+  <a href="{{ url_for('billing') }}">← Back to billing</a>
+  {% if customer %}
+  <a href="{{ url_for('customer_detail', customer_id=customer.id) }}">Customer ledger</a>
+  {% endif %}
+  <button type="button" onclick="window.print()">Print slip</button>
+</div>
+
+<div class="sheet">
+  {{ slip('*** DELIVERY SLIP — CUSTOMER COPY ***') }}
+  <div class="tear" aria-hidden="true"></div>
+  {{ slip('*** DELIVERY SLIP — SHOP COPY ***') }}
+</div>
+
+{% if autoprint %}
+<script>
+  window.addEventListener('load', function () {
+    setTimeout(function () { window.print(); }, 250);
+  });
+</script>
+{% endif %}
+</body>
+</html>

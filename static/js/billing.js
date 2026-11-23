@@ -11,6 +11,10 @@
     roundOff: 0,
     drafts: [],
     draftId: null,
+    // True while a save is in flight, so a second click is ignored.
+    saving: false,
+    // Special rates for the selected customer, keyed by product id as a string.
+    customerRates: {},
   };
 
   const el = {
@@ -51,6 +55,8 @@
     scrapDeduct: document.getElementById("scrap-deduct"),
     savePrint: document.getElementById("save-print"),
     status: document.getElementById("save-status"),
+    saveChallan: document.getElementById("save-challan"),
+    challanStatus: document.getElementById("challan-status"),
     headDue: document.getElementById("head-due"),
     holdLabel: document.getElementById("draft-label"),
     holdBtn: document.getElementById("hold-receipt"),
@@ -58,6 +64,23 @@
     draftsList: document.getElementById("drafts-list"),
     draftsCount: document.getElementById("drafts-count"),
     draftsToggle: document.getElementById("drafts-toggle"),
+    pvCustomer: document.getElementById("pv-customer"),
+    pvItems: document.getElementById("pv-items"),
+    pvBill: document.getElementById("pv-bill"),
+    pvPrevRow: document.getElementById("pv-prev-row"),
+    pvPrev: document.getElementById("pv-prev"),
+    pvCreditRow: document.getElementById("pv-credit-row"),
+    pvCredit: document.getElementById("pv-credit"),
+    pvScrapRow: document.getElementById("pv-scrap-row"),
+    pvScrap: document.getElementById("pv-scrap"),
+    pvGrand: document.getElementById("pv-grand"),
+    pvPaidRow: document.getElementById("pv-paid-row"),
+    pvPaid: document.getElementById("pv-paid"),
+    pvWaivedRow: document.getElementById("pv-waived-row"),
+    pvWaived: document.getElementById("pv-waived"),
+    pvDue: document.getElementById("pv-due"),
+    pvChangeRow: document.getElementById("pv-change-row"),
+    pvChange: document.getElementById("pv-change"),
   };
 
   const money = (n) =>
@@ -67,6 +90,12 @@
   function setStatus(message, isError) {
     el.status.textContent = message || "";
     el.status.style.color = isError ? "#c62f3c" : "#147a52";
+  }
+
+  function setChallanStatus(message, isError) {
+    if (!el.challanStatus) return;
+    el.challanStatus.textContent = message || "";
+    el.challanStatus.style.color = isError ? "#c62f3c" : "#147a52";
   }
 
   /* ---------------- products / rows ---------------- */
@@ -92,6 +121,7 @@
         const option = document.createElement("option");
         option.value = String(p.id);
         option.dataset.price = String(p.price_per_kg);
+        option.dataset.name = p.name;
         option.textContent = `${p.name} — ${CURRENCY} ${money(p.price_per_kg)}/kg`;
         group.appendChild(option);
       });
@@ -159,10 +189,14 @@
     const select = tr.querySelector(".product-select");
     const weightEl = tr.querySelector(".weight-input");
     const option = select.options[select.selectedIndex];
-    const price = option && option.dataset.price ? parseFloat(option.dataset.price) : 0;
+    const productId = select.value ? parseInt(select.value, 10) : null;
+    const shopPrice = option && option.dataset.price ? parseFloat(option.dataset.price) : 0;
+    // A saved special rate for this customer beats the shop price.
+    const special = productId !== null ? state.customerRates[String(productId)] : undefined;
+    const price = special !== undefined ? Number(special) : shopPrice;
     const weight = parseFloat(weightEl.value);
     return {
-      productId: select.value ? parseInt(select.value, 10) : null,
+      productId,
       price: isNaN(price) ? 0 : price,
       weight: isNaN(weight) || weight < 0 ? 0 : weight,
       weightRaw: weightEl.value,
@@ -262,6 +296,76 @@
     }
   }
 
+  /* ---------------- live receipt preview ---------------- */
+  /* Mirrors the thermal slip on screen from the same numbers recalcTotals
+     already computed — the print layout itself is untouched. */
+  function previewLine(name, kg, price) {
+    const tr = document.createElement("tr");
+    const item = document.createElement("td");
+    item.textContent = name;
+    const kgCell = document.createElement("td");
+    kgCell.className = "num";
+    kgCell.textContent = kg > 0 ? kg.toFixed(3) : "—";
+    const rateCell = document.createElement("td");
+    rateCell.className = "num";
+    rateCell.textContent = price ? money(price) : "—";
+    const amountCell = document.createElement("td");
+    amountCell.className = "num";
+    amountCell.textContent = money(round2(price * kg));
+    tr.append(item, kgCell, rateCell, amountCell);
+    return tr;
+  }
+
+  function renderPreview(t) {
+    if (!el.pvItems) return;
+
+    const typed =
+      el.newForm && !el.newForm.hidden && el.newForm.elements["name"]
+        ? el.newForm.elements["name"].value.trim()
+        : "";
+    el.pvCustomer.textContent = state.customer
+      ? state.customer.name
+      : typed || "No customer yet";
+
+    el.pvItems.innerHTML = "";
+    let lines = 0;
+    el.itemsBody.querySelectorAll("tr").forEach((tr) => {
+      const select = tr.querySelector(".product-select");
+      const option = select.options[select.selectedIndex];
+      if (!option || !option.value) return;
+      const { price, weight } = rowValues(tr);
+      el.pvItems.appendChild(
+        previewLine(option.dataset.name || option.textContent, weight, price)
+      );
+      lines += 1;
+    });
+    if (!lines) {
+      const empty = document.createElement("tr");
+      empty.className = "slip-empty";
+      const cell = document.createElement("td");
+      cell.colSpan = 4;
+      cell.textContent = "Add a product line to see the slip.";
+      empty.appendChild(cell);
+      el.pvItems.appendChild(empty);
+    }
+
+    el.pvBill.textContent = CURRENCY + " " + money(t.bill);
+    el.pvPrevRow.hidden = t.previous <= 0;
+    el.pvPrev.textContent = CURRENCY + " " + money(t.previous);
+    el.pvCreditRow.hidden = t.creditUsed <= 0;
+    el.pvCredit.textContent = "- " + CURRENCY + " " + money(t.creditUsed);
+    el.pvScrapRow.hidden = t.scrap <= 0;
+    el.pvScrap.textContent = "- " + CURRENCY + " " + money(t.scrap);
+    el.pvGrand.textContent = CURRENCY + " " + money(t.grand);
+    el.pvPaidRow.hidden = t.cashApplied <= 0;
+    el.pvPaid.textContent = CURRENCY + " " + money(t.cashApplied);
+    el.pvWaivedRow.hidden = t.waived <= 0;
+    el.pvWaived.textContent = "- " + CURRENCY + " " + money(t.waived);
+    el.pvDue.textContent = CURRENCY + " " + money(t.dueNow);
+    el.pvChangeRow.hidden = t.change <= 0;
+    el.pvChange.textContent = CURRENCY + " " + money(t.change);
+  }
+
   function recalcTotals() {
     let bill = 0;
     el.itemsBody.querySelectorAll("tr").forEach((tr) => {
@@ -331,9 +435,40 @@
       }
       el.headDue.innerHTML = "<span>" + amount + "</span> " + label;
     }
+
+    renderPreview({
+      bill: bill,
+      previous: previous,
+      creditUsed: creditUsed,
+      scrap: scrapApplied,
+      grand: grand,
+      cashApplied: cashApplied,
+      waived: waived,
+      dueNow: dueNow,
+      change: change,
+    });
   }
 
   /* ---------------- customers ---------------- */
+  async function loadRates(customerId) {
+    state.customerRates = {};
+    try {
+      const res = await fetch("/api/customers/" + customerId);
+      if (res.ok) {
+        const data = await res.json();
+        const map = {};
+        Object.keys(data.rates || {}).forEach((key) => {
+          map[String(key)] = data.rates[key];
+        });
+        state.customerRates = map;
+      }
+    } catch (err) {
+      // Rates are a bonus: the shop price is used if they cannot be read.
+    }
+    el.itemsBody.querySelectorAll("tr").forEach(recalcRow);
+    recalcTotals();
+  }
+
   function showCustomer(customer) {
     state.customer = customer;
     el.search.value = "";
@@ -353,11 +488,14 @@
     el.selected.hidden = false;
     el.newForm.hidden = true;
     el.search.closest(".customer-search").hidden = true;
+    loadRates(customer.id);
     recalcTotals();
   }
 
   function clearCustomer() {
     state.customer = null;
+    state.customerRates = {};
+    el.itemsBody.querySelectorAll("tr").forEach(recalcRow);
     el.selected.hidden = true;
     el.search.closest(".customer-search").hidden = false;
     el.search.value = "";
@@ -438,6 +576,19 @@
 
   /* ---------------- save & print ---------------- */
   async function saveSale() {
+    // A fast double-click used to slip a second save in while the first was
+    // still awaiting the scrap rates, posting the sale twice. Reject it here,
+    // synchronously, before any await; the flag clears when the save ends.
+    if (state.saving) return;
+    state.saving = true;
+    try {
+      await doSaveSale();
+    } finally {
+      state.saving = false;
+    }
+  }
+
+  async function doSaveSale() {
     setStatus("");
     if (!state.customer) {
       setStatus("Select or create a customer first.", true);
@@ -541,6 +692,67 @@
       setStatus(err.message || "Could not save the sale.", true);
     } finally {
       el.savePrint.disabled = false;
+    }
+  }
+
+  /* ---------------- weight-only challan ---------------- */
+  async function saveChallan() {
+    setChallanStatus("");
+    if (!state.customer) {
+      setChallanStatus("Select or create a customer first.", true);
+      el.search.focus();
+      return;
+    }
+
+    const items = [];
+    let invalid = false;
+    el.itemsBody.querySelectorAll("tr").forEach((tr) => {
+      const { productId, weight, weightRaw } = rowValues(tr);
+      if (!productId && !weightRaw) return;
+      if (!productId || !(weight > 0)) invalid = true;
+      items.push({ product_id: productId, weight_kg: weight });
+    });
+    if (invalid) {
+      setChallanStatus("Every line needs a product and a weight above 0 kg.", true);
+      return;
+    }
+    if (!items.length) {
+      setChallanStatus("Add at least one product line.", true);
+      return;
+    }
+
+    const who = state.customer.name;
+    el.saveChallan.disabled = true;
+    setChallanStatus("Saving slip…");
+    // Opened during the click so the browser lets the slip tab through.
+    const printWindow = window.open("", "_blank");
+    try {
+      const res = await fetch("/api/challans", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customer_id: state.customer.id, items: items }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not save the slip.");
+
+      const slipUrl = data.challan_url + "?print=1";
+      if (printWindow && !printWindow.closed) {
+        printWindow.location.href = slipUrl;
+      } else {
+        setChallanStatus("Slip saved. Pop-up blocked — open the challan from the customer ledger.", true);
+      }
+      resetForm();
+      await loadDrafts();
+      setChallanStatus(
+        "Slip #" + String(data.challan_no).padStart(5, "0") + " saved for " + who +
+        " — " + data.total_weight.toFixed(3) +
+        " kg held as unbilled pickups until the end-of-day master receipt."
+      );
+    } catch (err) {
+      if (printWindow && !printWindow.closed) printWindow.close();
+      setChallanStatus(err.message || "Could not save the slip.", true);
+    } finally {
+      el.saveChallan.disabled = false;
     }
   }
 
@@ -845,6 +1057,8 @@
     el.newForm.hidden = true;
     el.newForm.reset();
   });
+  // A customer typed but not yet saved still shows on the preview slip.
+  el.newForm.addEventListener("input", recalcTotals);
 
   el.newForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -854,6 +1068,7 @@
       phone: form.phone.value.trim(),
       shop_name: form.shop_name.value.trim(),
       address: form.address.value.trim(),
+      opening_due: parseFloat(form.opening_due.value) || 0,
     };
     if (!payload.name) {
       setStatus("Customer name is required.", true);
@@ -931,6 +1146,7 @@
     recalcTotals();
   });
   el.savePrint.addEventListener("click", saveSale);
+  if (el.saveChallan) el.saveChallan.addEventListener("click", saveChallan);
 
   el.holdBtn.addEventListener("click", holdReceipt);
   el.draftsList.addEventListener("click", (event) => {

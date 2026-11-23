@@ -19,6 +19,7 @@
             aria-expanded="true" aria-controls="drafts-list">
       <span class="drafts-title">Held Receipts</span>
       <span class="drafts-count" id="drafts-count">(0)</span>
+      <span class="drafts-chevron" aria-hidden="true">▾</span>
     </button>
     <p class="small muted drafts-hint">
       Parked bills stay in <code>shop.db</code> until you Save &amp; Print them — they never touch dues or Daily Sales.
@@ -72,6 +73,11 @@
             Shop address
             <input class="input" type="text" name="address" placeholder="Mirpur 10, Dhaka">
           </label>
+          <label>
+            Opening / previous due ({{ CURRENCY }})
+            <input class="input" type="number" name="opening_due" step="0.01" min="0"
+                   placeholder="0" title="Old unpaid balance from your paper ledger">
+          </label>
         </div>
         <div class="row-actions">
           <button type="submit" class="btn btn-primary btn-small">Save customer</button>
@@ -99,7 +105,10 @@
         </thead>
         <tbody id="items-body"></tbody>
       </table>
-      <p class="small muted hint">Tip: press <kbd>Enter</kbd> on the weight field to add another line.</p>
+      <p class="small muted hint">
+        Tip: press <kbd>Enter</kbd> on the weight field to add another line.
+        A customer's <a href="{{ url_for('customers') }}">special rates</a> replace the shop rate automatically.
+      </p>
     </section>
 
     <!-- Scrap -->
@@ -143,8 +152,57 @@
     </section>
   </div>
 
-  <!-- Totals -->
-  <aside class="card totals-card">
+  <!-- Live preview + payment -->
+  <aside class="billing-side">
+    <!-- Paper-style preview: the same figures the thermal slip will print -->
+    <section class="card preview-card no-print" aria-label="Live receipt preview">
+      <div class="card-head">
+        <h3>Live Receipt Preview</h3>
+        <span class="tag">80mm</span>
+      </div>
+      <div class="slip-mat">
+        <div class="slip">
+          <div class="slip-head">
+            <strong>{{ SHOP.name }}</strong>
+            <span>{{ SHOP.tagline }}</span>
+          </div>
+          <div class="slip-rule"></div>
+          <div class="slip-meta">
+            <div><span>Customer</span><b id="pv-customer">No customer yet</b></div>
+            <div><span>Date</span><b>{{ today }}</b></div>
+          </div>
+          <div class="slip-rule"></div>
+          <table class="slip-table">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th class="num">Kg</th>
+                <th class="num">Rate</th>
+                <th class="num">Amount</th>
+              </tr>
+            </thead>
+            <tbody id="pv-items">
+              <tr class="slip-empty"><td colspan="4">Add a product line to see the slip.</td></tr>
+            </tbody>
+          </table>
+          <div class="slip-rule"></div>
+          <div class="slip-totals">
+            <div><span>Bill total</span><b id="pv-bill">{{ CURRENCY }} 0.00</b></div>
+            <div id="pv-prev-row" hidden><span>Previous due</span><b id="pv-prev">{{ CURRENCY }} 0.00</b></div>
+            <div id="pv-credit-row" hidden><span>Less: credit</span><b id="pv-credit">{{ CURRENCY }} 0.00</b></div>
+            <div id="pv-scrap-row" hidden><span>Less: scrap</span><b id="pv-scrap">{{ CURRENCY }} 0.00</b></div>
+            <div class="slip-strong"><span>Grand total</span><b id="pv-grand">{{ CURRENCY }} 0.00</b></div>
+            <div id="pv-paid-row" hidden><span>Paid today</span><b id="pv-paid">{{ CURRENCY }} 0.00</b></div>
+            <div id="pv-waived-row" hidden><span>Round-off</span><b id="pv-waived">{{ CURRENCY }} 0.00</b></div>
+            <div class="slip-due"><span>Remaining due</span><b id="pv-due">{{ CURRENCY }} 0.00</b></div>
+            <div id="pv-change-row" hidden><span>Change</span><b id="pv-change">{{ CURRENCY }} 0.00</b></div>
+          </div>
+          <p class="slip-foot">Preview only — the slip prints when you save</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card totals-card">
     <h3>4. Payment</h3>
     <div class="totals">
       <div class="total-row">
@@ -211,6 +269,14 @@
     </button>
     <p class="small muted center" id="save-status" role="status"></p>
 
+    <button type="button" class="btn btn-full btn-challan" id="save-challan">
+      Weight-Only Slip (Challan)
+    </button>
+    <p class="small muted center" id="challan-status" role="status">
+      Prints weights only — no prices, no due. The items wait as unbilled pickups
+      until the customer's end-of-day master receipt.
+    </p>
+
     <div class="hold-block">
       <label for="draft-label">Hold this receipt (optional label)</label>
       <input class="input" type="text" id="draft-label" maxlength="60"
@@ -225,6 +291,7 @@
       <li>Previous due carries forward automatically</li>
       <li>Receipt opens ready for printing</li>
     </ul>
+    </section>
   </aside>
 </div>
 {% endblock %}
