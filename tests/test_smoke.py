@@ -1,7 +1,8 @@
 """Smoke test for the Aluminum POS — the money paths that must not regress.
 
-Covers, in one file: saving a receipt (and the double-click guard in front of
-it), weight-only challans and the end-of-day master receipt built from them,
+Covers, in one file: saving a receipt (the double-click guard in front of it,
+and the server's own refusal to book one bill twice, including two submits
+fired at the same moment), weight-only challans and the end-of-day master receipt built from them,
 held drafts, due payments from the customer page, and the arithmetic that ties
 them together (previous due, credit, scrap, round-off, change).
 
@@ -27,6 +28,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
 
@@ -214,6 +216,93 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(self.money_after(html, "Total sales value"), 3000.00)
         self.assertEqual(self.money_after(html, "New due"), 2000.00)
 
+    def test_repeat_submit_is_refused_by_the_server(self):
+        """A second identical POST books nothing, with no browser involved.
+
+        billing.js stops most double-clicks, but the endpoint must hold on its
+        own: the repeat is answered with the first receipt, so the due moves
+        once and only one sale exists.
+        """
+        items = [{"product_id": self.product["Smoke Sheet"], "weight_kg": 3}]
+        first = self.save(items, 500)
+        self.assertEqual(first.status_code, 201, first.get_data(as_text=True))
+        self.assertFalse(first.get_json()["duplicate"])
+
+        repeat = self.save(items, 500)
+        self.assertEqual(repeat.status_code, 200, "the repeat must not be saved again")
+        self.assertTrue(repeat.get_json()["duplicate"])
+        self.assertEqual(
+            repeat.get_json()["sale_id"], first.get_json()["sale_id"],
+            "the repeat must answer with the first receipt",
+        )
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sales"), 1)
+        self.assertAlmostEqual(self.account()["due"], 400.00, places=2)  # 900 - 500
+        self.assertEqual(self.money_after(self.daily(), "Total sales value"), 900.00)
+
+        # A different bill straight afterwards is a real second sale.
+        other = self.save(
+            [{"product_id": self.product["Smoke Sheet"], "weight_kg": 4}], 500
+        )
+        self.assertEqual(other.status_code, 201, other.get_data(as_text=True))
+        self.assertFalse(other.get_json()["duplicate"])
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sales"), 2)
+
+    def test_two_identical_submits_at_once_book_one_sale(self):
+        """Two copies of one bill fired at the same moment make one sale.
+
+        This only holds if the duplicate check runs inside the write
+        transaction: checked before it, both requests could read "no such bill
+        yet" and both go on to insert one. The barrier releases both threads
+        together so the requests are in the server at the same time.
+        """
+        payload = {
+            "customer_id": self.customer_id,
+            "items": [{"product_id": self.product["Smoke Sheet"], "weight_kg": 5}],
+            "paid": 500,
+        }
+        barrier = threading.Barrier(2, timeout=15)
+        answers = []
+        failures = []
+        lock = threading.Lock()
+
+        def submit():
+            client = pos.app.test_client()
+            try:
+                barrier.wait()
+                response = client.post("/api/sales", json=payload)
+                with lock:
+                    answers.append(response)
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                with lock:
+                    failures.append(exc)
+
+        threads = [threading.Thread(target=submit) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(answers), 2, "both requests must have answered")
+        self.assertEqual(
+            sorted(response.status_code for response in answers),
+            [200, 201],
+            "one request saves, the other is answered with the first receipt",
+        )
+
+        bodies = [response.get_json() for response in answers]
+        self.assertEqual(
+            len({body["sale_id"] for body in bodies}),
+            1,
+            "both answers must point at the same receipt",
+        )
+        self.assertEqual(sum(1 for body in bodies if body["duplicate"]), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sales"), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sale_items"), 1)
+        # One bill, so the due moved once: 1500 - 500.
+        self.assertAlmostEqual(self.account()["due"], 1000.00, places=2)
+        self.assertEqual(self.money_after(self.daily(), "Total sales value"), 1500.00)
+
     def test_prices_come_from_the_shop_not_the_browser(self):
         response = self.client.post(
             "/api/sales",
@@ -234,12 +323,12 @@ class SmokeTest(unittest.TestCase):
         self.assertAlmostEqual(response.get_json()["subtotal"], 600.00, places=2)
 
     def test_save_double_click_guard_is_still_in_the_billing_script(self):
-        """The second click of a fast double-click must be refused.
+        """The browser must still refuse the second click of a double-click.
 
-        The guard lives in static/js/billing.js, ahead of the first `await`, so
-        a Python test cannot click for it. This pins the guard's shape instead:
-        a flag is raised synchronously before the POST and cleared afterwards,
-        and the browser's own Save button is disabled while the save runs.
+        The server-side copy of this protection is tested below; this one pins
+        the guard in static/js/billing.js, which a Python test cannot click: a
+        flag is raised synchronously ahead of the first `await` and cleared
+        afterwards, and the Save button is disabled while the save runs.
         """
         js = (ROOT / "static" / "js" / "billing.js").read_text(encoding="utf-8")
         early_return = js.find("if (state.saving) return;")
@@ -329,6 +418,97 @@ class SmokeTest(unittest.TestCase):
         account = self.account()
         self.assertAlmostEqual(account["due"], 0.00, places=2)
         self.assertAlmostEqual(account["credit"], 350.00, places=2)
+
+    # --- voiding a saved receipt -------------------------------------------
+
+    def test_void_removes_the_bill_from_due_and_totals(self):
+        figures = self.save(
+            [{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 1000
+        ).get_json()
+        sale_id = figures["sale_id"]
+        self.assertAlmostEqual(self.account()["due"], 2000.00, places=2)
+
+        voided = self.client.post(
+            f"/sales/{sale_id}/void", data={"reason": "wrong weight"}
+        )
+        self.assertEqual(voided.status_code, 302)
+
+        stored = self.sale(sale_id)
+        self.assertIsNotNone(stored["voided_at"], "the void must be recorded")
+        self.assertEqual(stored["void_reason"], "wrong weight")
+        # The audit trail stays: row and lines are never deleted or rewritten.
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sales"), 1)
+        line = self.one("SELECT * FROM sale_items WHERE sale_id = ?", (sale_id,))
+        self.assertIsNotNone(line)
+        self.assertAlmostEqual(line["line_total"], 3000.00, places=2)
+        self.assertAlmostEqual(stored["subtotal"], 3000.00, places=2)
+
+        self.assertAlmostEqual(self.account()["due"], 0.00, places=2)
+        html = self.daily()
+        self.assertEqual(self.money_after(html, "Cash collected"), 0.00)
+        self.assertEqual(self.money_after(html, "Total sales value"), 0.00)
+        self.assertEqual(self.money_after(html, "New due"), 0.00)
+        self.assertIn("1 voided receipt", html)
+
+        receipt = self.client.get(f"/receipt/{sale_id}").get_data(as_text=True)
+        self.assertIn("** VOID **", receipt)
+        self.assertIn("wrong weight", receipt)
+        self.assertNotIn("receipt-void-form", receipt, "a void receipt must not offer voiding again")
+
+    def test_void_is_post_only_and_happens_once(self):
+        sale_id = self.save(
+            [{"product_id": self.product["Smoke Pipe"], "weight_kg": 2}], 500
+        ).get_json()["sale_id"]
+
+        self.assertEqual(
+            self.client.get(f"/sales/{sale_id}/void").status_code,
+            405,
+            "voiding a receipt must not be a link anyone can click",
+        )
+
+        self.client.post(f"/sales/{sale_id}/void", data={"reason": "first reason"})
+        self.client.post(f"/sales/{sale_id}/void", data={"reason": "second reason"})
+        self.assertEqual(self.sale(sale_id)["void_reason"], "first reason")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sales"), 1)
+        self.assertAlmostEqual(self.account()["due"], 0.00, places=2)
+
+    def test_void_master_receipt_returns_its_challans_to_pending(self):
+        self.client.post(
+            "/api/challans",
+            json={
+                "customer_id": self.customer_id,
+                "items": [{"product_id": self.product["Smoke Sheet"], "weight_kg": 4}],
+            },
+        )
+        day = self.today()
+        self.client.post(
+            f"/customers/{self.customer_id}/pickups/{day}/bill", data={"paid": "500"}
+        )
+        sale = self.one("SELECT * FROM sales")
+        self.assertAlmostEqual(self.account()["due"], 700.00, places=2)  # 1200 - 500
+
+        self.client.post(f"/sales/{sale['id']}/void", data={"reason": "wrong price"})
+
+        self.assertAlmostEqual(self.account()["due"], 0.00, places=2)
+        self.assertEqual(
+            self.scalar("SELECT COUNT(*) FROM pickups WHERE sale_id IS NOT NULL"),
+            0,
+            "the challans must be unbilled again",
+        )
+        # The kilos are back on the day's weight, with no revenue behind them.
+        self.assertAlmostEqual(self.daily_weight(), 4.000, places=3)
+        self.assertEqual(self.money_after(self.daily(), "Total sales value"), 0.00)
+
+        # A corrected master receipt can now be built from the same challans.
+        again = self.client.post(
+            f"/customers/{self.customer_id}/pickups/{day}/bill", data={"paid": "0"}
+        )
+        self.assertEqual(again.status_code, 302)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sales"), 2)
+        self.assertEqual(
+            self.scalar("SELECT COUNT(*) FROM sales WHERE voided_at IS NULL"), 1
+        )
+        self.assertAlmostEqual(self.account()["due"], 1200.00, places=2)
 
     # --- challans and the end-of-day master receipt ------------------------
 

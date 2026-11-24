@@ -1995,6 +1995,27 @@ def record_sale(
 
     try:
         db.execute("BEGIN IMMEDIATE")
+        # The duplicate check belongs inside this write transaction. BEGIN
+        # IMMEDIATE takes the write lock before the read, so two copies of one
+        # submit arriving at the same moment are serialised: the first inserts,
+        # the second waits for it to commit, then finds it here and writes
+        # nothing. A check made before the transaction could miss it and book
+        # the bill twice.
+        if not pickup_billed:
+            repeated = repeat_of_recent_sale(
+                db, customer_id, subtotal, paid, scrap_total
+            )
+            if repeated is not None:
+                # Still tidy up the draft the repeat carried along.
+                if draft_id:
+                    db.execute(
+                        "DELETE FROM draft_receipts WHERE id = ?", (draft_id,)
+                    )
+                db.commit()
+                answer = sale_response(repeated)
+                answer["duplicate"] = True
+                return answer
+
         cur = db.execute(
             "INSERT INTO sales (customer_id, subtotal, previous_due, grand_total,"
             " paid, new_due, created_at, scrap_black_kg, scrap_white_kg,"
@@ -2058,6 +2079,49 @@ def record_sale(
         "change": change,
         "credit_after": round(credit_before - credit_used + scrap_credit, 2),
     }
+
+
+# The flag in billing.js stops most double-clicks, but the save endpoint must
+# not depend on the browser for that. The same bill for the same customer
+# arriving again within this many seconds is one click that reached the server
+# twice, not two real sales.
+DUPLICATE_SAVE_WINDOW_SECONDS = 10
+
+
+def sale_response(row):
+    """The JSON the billing screen reads, rebuilt from a saved sale row."""
+    return {
+        "sale_id": row["id"],
+        "receipt_url": url_for("receipt", sale_id=row["id"]),
+        "subtotal": row["subtotal"],
+        "previous_due": row["previous_due"],
+        "grand_total": row["grand_total"],
+        "paid": row["paid"],
+        "scrap_total": row["scrap_total"],
+        "new_due": row["new_due"],
+        "round_off": row["round_off"],
+        "credit_used": row["credit_used"],
+        "cash_applied": row["cash_applied"],
+    }
+
+
+def repeat_of_recent_sale(db, customer_id, subtotal, paid, scrap_total):
+    """The bill this request already saved, when it is a repeat submit.
+
+    Customer, subtotal, tendered cash and scrap value all have to match, and
+    cannot differ between two copies of one submit, so a second identical
+    request is answered with the receipt the first one produced instead of a
+    second bill. A genuinely different bill never matches.
+    """
+    cutoff = f"-{DUPLICATE_SAVE_WINDOW_SECONDS} seconds"
+    return db.execute(
+        "SELECT * FROM sales"
+        " WHERE customer_id = ? AND subtotal = ? AND paid = ?"
+        " AND scrap_total = ? AND pickup_billed = 0 AND voided_at IS NULL"
+        " AND created_at >= datetime('now', 'localtime', ?)"
+        " ORDER BY id DESC LIMIT 1",
+        (customer_id, subtotal, paid, scrap_total, cutoff),
+    ).fetchone()
 
 
 @app.post("/api/sales")
@@ -2149,6 +2213,8 @@ def api_create_sale():
             }
         )
 
+    # record_sale hands back the first receipt instead of a second bill when
+    # this is a repeat submit, checked inside its write transaction.
     result = record_sale(
         db,
         customer_id,
@@ -2160,6 +2226,9 @@ def api_create_sale():
     )
     if result.get("error"):
         return jsonify({"error": result["error"]}), 500
+    if result.get("duplicate"):
+        return jsonify(result), 200
+    result["duplicate"] = False
     return jsonify(result), 201
 
 
