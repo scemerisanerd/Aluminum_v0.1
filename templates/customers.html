@@ -51,6 +51,22 @@
 
 <div class="layout-split">
   <section class="card">
+    <form class="filter-form no-print" method="get" action="{{ url_for('customers') }}">
+      <label for="customer-search">Find a customer
+        <input type="search" id="customer-search" name="q" value="{{ search }}"
+               placeholder="Name, phone, shop or address" autocomplete="off">
+      </label>
+      <label class="filter-toggle" for="customer-due-only">
+        <input type="checkbox" id="customer-due-only" name="due" value="1"
+               {{ 'checked' if due_only }} onchange="this.form.submit()">
+        Due only
+      </label>
+      <button type="submit" class="btn btn-small">Search</button>
+      {% if search or due_only %}
+        <a class="btn btn-small btn-ghost" href="{{ url_for('customers') }}">Clear</a>
+        <span class="filter-count">{{ customers|length }} of {{ total_customers }} shown</span>
+      {% endif %}
+    </form>
     {% if customers %}
     <table class="data-table">
       <thead>
@@ -86,6 +102,9 @@
         {% endfor %}
       </tbody>
     </table>
+    {% elif total_customers %}
+      <p class="empty">No customer matches this filter.
+        <a href="{{ url_for('customers') }}">Clear it</a> to see all {{ total_customers }}.</p>
     {% else %}
       <p class="empty">No customers yet. Add one here, or create it while making a receipt.</p>
     {% endif %}

@@ -102,7 +102,11 @@ CREATE TABLE IF NOT EXISTS sales (
     round_off        REAL    NOT NULL DEFAULT 0,
     -- 1 when this bill is an end-of-day master receipt built from challans.
     -- Its weight was already counted on the day the goods were picked up.
-    pickup_billed    INTEGER NOT NULL DEFAULT 0
+    pickup_billed    INTEGER NOT NULL DEFAULT 0,
+    -- A voided bill is never deleted: its row and lines stay exactly as saved
+    -- for the audit trail, but it counts nowhere in due, Daily Sales or totals.
+    voided_at        TEXT,
+    void_reason      TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS scrap_rates (
@@ -244,6 +248,13 @@ SALE_PICKUP_COLUMNS = (
     ("pickup_billed", "INTEGER NOT NULL DEFAULT 0"),
 )
 
+# A voided receipt keeps its row for the audit trail; these two columns are
+# what take it out of the due balance and every sales total.
+SALE_VOID_COLUMNS = (
+    ("voided_at", "TEXT"),
+    ("void_reason", "TEXT NOT NULL DEFAULT ''"),
+)
+
 # A pickup voided before billing keeps its row for the audit trail but stops
 # counting everywhere: pending bills, master receipts and Daily Sales weight.
 PICKUP_CANCEL_COLUMNS = (
@@ -339,6 +350,7 @@ def init_db():
         + SALE_CREDIT_COLUMNS
         + SALE_ROUND_OFF_COLUMNS
         + SALE_PICKUP_COLUMNS
+        + SALE_VOID_COLUMNS
     ):
         if name not in existing:
             con.execute(f"ALTER TABLE sales ADD COLUMN {name} {declaration}")
@@ -521,11 +533,17 @@ app.jinja_env.globals["SHOP"] = SHOP
 # what counts. Scrap beyond a bill is never handed back, so it stays as credit
 # and comes off the next bill automatically. A waived remainder is written off
 # on that bill, so it never shows up as due here.
+# A voided bill is left out of every term, so reversing it puts the account
+# back exactly where it stood before that receipt was saved.
 NET_BALANCE_SQL = (
-    "(COALESCE((SELECT SUM(subtotal) FROM sales WHERE customer_id = {c}), 0)"
-    " - COALESCE((SELECT SUM(cash_applied) FROM sales WHERE customer_id = {c}), 0)"
-    " - COALESCE((SELECT SUM(scrap_total) FROM sales WHERE customer_id = {c}), 0)"
-    " - COALESCE((SELECT SUM(round_off) FROM sales WHERE customer_id = {c}), 0)"
+    "(COALESCE((SELECT SUM(subtotal) FROM sales"
+    " WHERE customer_id = {c} AND voided_at IS NULL), 0)"
+    " - COALESCE((SELECT SUM(cash_applied) FROM sales"
+    " WHERE customer_id = {c} AND voided_at IS NULL), 0)"
+    " - COALESCE((SELECT SUM(scrap_total) FROM sales"
+    " WHERE customer_id = {c} AND voided_at IS NULL), 0)"
+    " - COALESCE((SELECT SUM(round_off) FROM sales"
+    " WHERE customer_id = {c} AND voided_at IS NULL), 0)"
     " - COALESCE((SELECT SUM(amount) FROM payments WHERE customer_id = {c}), 0)"
     " - COALESCE((SELECT SUM(total) FROM scrap_payments"
     "             WHERE customer_id = {c}), 0)"
@@ -653,10 +671,25 @@ def customers_with_balances(db):
 
 @app.route("/customers")
 def customers():
-    """Tab 3: all customers with due balance."""
+    """Tab 3: all customers with due balance, searchable and due-only."""
     db = get_db()
     rows = customers_with_balances(db)
+    # The header total always covers every customer: filtering only narrows
+    # the list on screen, it never changes what the shop is owed.
     total_due = round(sum(r["balance"] for r in rows), 2)
+    search = (request.args.get("q") or "").strip()
+    due_only = request.args.get("due") == "1"
+    shown = [r for r in rows if not due_only or r["balance"] > 0]
+    if search:
+        needle = search.casefold()
+        shown = [
+            r
+            for r in shown
+            if needle
+            in " ".join(
+                (r["name"] or "", r["phone"] or "", r["shop_name"] or "", r["address"] or "")
+            ).casefold()
+        ]
     # Every customer/day with unbilled challan pickups: the "Pending Daily
     # Bills" list. Nothing here is a sale yet.
     pending_bills = db.execute(
@@ -670,8 +703,11 @@ def customers():
     return render_template(
         "customers.html",
         active="customers",
-        customers=rows,
+        customers=shown,
+        total_customers=len(rows),
         total_due=total_due,
+        search=search,
+        due_only=due_only,
         pending_bills=pending_bills,
     )
 
@@ -681,31 +717,69 @@ def daily_summary():
     """Tab 4: what was sold on one day, ranked by weight or by revenue."""
     db = get_db()
     now = datetime.now()
-    today_iso = now.strftime("%Y-%m-%d")
 
     # Any past day can be reviewed; a missing or malformed date falls back to
-    # today instead of showing an error page.
-    requested = (request.args.get("date") or "").strip()
-    day = now.date()
-    if requested:
+    # today instead of showing an error page. `from`/`to` ask for a span (a
+    # month, a week, any two dates); the older `date` link still works.
+    today = now.date()
+
+    def parse_day(value):
         try:
-            day = datetime.strptime(requested, "%Y-%m-%d").date()
+            return datetime.strptime((value or "").strip(), "%Y-%m-%d").date()
         except ValueError:
-            day = now.date()
-    day_iso = day.strftime("%Y-%m-%d")
+            return None
+
+    wants_span = bool(
+        (request.args.get("from") or "").strip()
+        or (request.args.get("to") or "").strip()
+    )
+    if wants_span:
+        start = parse_day(request.args.get("from")) or parse_day(
+            request.args.get("to")
+        ) or today
+        end = parse_day(request.args.get("to")) or start
+        if start > end:
+            start, end = end, start
+    else:
+        start = end = parse_day(request.args.get("date")) or today
+    start_iso = start.strftime("%Y-%m-%d")
+    end_iso = end.strftime("%Y-%m-%d")
+    # One day reads as a date; anything wider reads as a span.
+    if start == end:
+        range_label = start.strftime("%A, %d %b %Y")
+    else:
+        range_label = f"{start.strftime('%d %b %Y')} – {end.strftime('%d %b %Y')}"
+    is_today = start_iso == end_iso == today.strftime("%Y-%m-%d")
+    month_start_iso = today.replace(day=1).strftime("%Y-%m-%d")
     sort = "revenue" if request.args.get("sort") == "revenue" else "weight"
 
     totals = db.execute(
         "SELECT COUNT(*) AS receipts,"
         " COALESCE(SUM(subtotal), 0) AS sales,"
-        " COALESCE(SUM(cash_applied), 0) AS cash,"
+        " COALESCE(SUM(cash_applied), 0) AS cash_on_bills,"
         # new_due is the running account balance, so it already contains the
         # previous due; only the change it made today is due added today.
         " COALESCE(SUM(new_due - previous_due), 0) AS due,"
         " COALESCE(SUM(scrap_total), 0) AS scrap"
-        " FROM sales WHERE date(created_at) = ?",
-        (day_iso,),
+        " FROM sales WHERE date(created_at) BETWEEN ? AND ?"
+        " AND voided_at IS NULL",
+        (start_iso, end_iso),
     ).fetchone()
+    # Cash handed over on the customer page to clear an older due lands in the
+    # same drawer, so it counts as collected for the same dates.
+    payments = db.execute(
+        "SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amount"
+        " FROM payments WHERE date(created_at) BETWEEN ? AND ?",
+        (start_iso, end_iso),
+    ).fetchone()
+    due_payments = round(float(payments["amount"] or 0), 2)
+    cash_collected = round(float(totals["cash_on_bills"] or 0) + due_payments, 2)
+    # Voided bills stay on the record but never in the period's money or weight.
+    voided_today = db.execute(
+        "SELECT COUNT(*) FROM sales"
+        " WHERE date(created_at) BETWEEN ? AND ? AND voided_at IS NOT NULL",
+        (start_iso, end_iso),
+    ).fetchone()[0]
 
     # Weight is counted on the day the goods left the shop: a weight-only
     # challan adds its kg on the pickup day, and the master receipt built from
@@ -717,14 +791,15 @@ def daily_summary():
         "     AS weight,"
         " SUM(si.line_total) AS revenue"
         " FROM sale_items si JOIN sales s ON s.id = si.sale_id"
-        " WHERE date(s.created_at) = ?"
+        " WHERE date(s.created_at) BETWEEN ? AND ? AND s.voided_at IS NULL"
         " GROUP BY si.product_name",
-        (day_iso,),
+        (start_iso, end_iso),
     ).fetchall()
     picked = db.execute(
         "SELECT product_name, SUM(weight_kg) AS weight FROM pickups"
-        " WHERE picked_on = ? AND cancelled_at IS NULL GROUP BY product_name",
-        (day_iso,),
+        " WHERE picked_on BETWEEN ? AND ? AND cancelled_at IS NULL"
+        " GROUP BY product_name",
+        (start_iso, end_iso),
     ).fetchall()
 
     merged = {}
@@ -761,14 +836,21 @@ def daily_summary():
     return render_template(
         "daily.html",
         active="daily",
-        day_iso=day_iso,
-        day_label=day.strftime("%A, %d %b %Y"),
-        today_iso=today_iso,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        range_label=range_label,
+        today_iso=today.strftime("%Y-%m-%d"),
+        month_start_iso=month_start_iso,
+        is_today=is_today,
         sort=sort,
         totals=totals,
+        cash_collected=cash_collected,
+        due_payments=due_payments,
+        due_payment_count=payments["count"],
         products=products,
         total_weight=total_weight,
         avg_bill=avg_bill,
+        voided_today=voided_today,
         printed_at=now.strftime("%d %b %Y, %I:%M %p"),
     )
 
@@ -839,6 +921,9 @@ def customer_detail(customer_id):
         (customer_id,),
     ).fetchall()
 
+    # Totals are for what the customer still owes against: a voided bill is
+    # listed below for the record but counted nowhere.
+    live_sales = [s for s in sales if s["voided_at"] is None]
     account = customer_account(db, customer_id)
     return render_template(
         "customer_detail.html",
@@ -856,10 +941,10 @@ def customer_detail(customer_id):
         cancelled_pickups=cancelled_pickups,
         balance=account["due"],
         credit=account["credit"],
-        total_billed=sum(s["subtotal"] for s in sales),
-        total_paid=sum(s["cash_applied"] for s in sales)
-        + sum(s["scrap_total"] for s in sales)
-        + sum(s["round_off"] for s in sales)
+        total_billed=sum(s["subtotal"] for s in live_sales),
+        total_paid=sum(s["cash_applied"] for s in live_sales)
+        + sum(s["scrap_total"] for s in live_sales)
+        + sum(s["round_off"] for s in live_sales)
         + sum(p["amount"] for p in payments)
         + sum(e["total"] for e in scrap_entries),
     )
@@ -1295,6 +1380,64 @@ def bill_pickups(customer_id, day):
         f"{CURRENCY} {money(customer_balance(db, customer_id))}."
     )
     return redirect(url_for("receipt", sale_id=result["sale_id"], print=1))
+
+
+@app.post("/sales/<int:sale_id>/void")
+def void_sale(sale_id):
+    """Void a saved receipt without deleting anything.
+
+    The sale row and its lines stay exactly as they were saved, so the record
+    of what was printed is never lost; `voided_at` takes the bill out of the
+    customer's due and out of every sales total. Challans that bill covered go
+    back to being unbilled, so a corrected master receipt can be generated
+    again.
+    """
+    db = get_db()
+    sale = db.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
+    if sale is None:
+        abort(404)
+    back = url_for("customer_detail", customer_id=sale["customer_id"])
+    if request.form.get("back") == "receipt":
+        back = url_for("receipt", sale_id=sale_id)
+    if sale["voided_at"] is not None:
+        note(f"INV-{sale_id:05d} is already void.", "error")
+        return redirect(back)
+
+    reason = (request.form.get("reason") or "").strip()[:200]
+    due_before = customer_balance(db, sale["customer_id"])
+    released = db.execute(
+        "SELECT COUNT(*) FROM pickups WHERE sale_id = ?", (sale_id,)
+    ).fetchone()[0]
+
+    db.execute(
+        "UPDATE sales SET voided_at = ?, void_reason = ?"
+        " WHERE id = ? AND voided_at IS NULL",
+        (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            reason or "Voided from the ledger",
+            sale_id,
+        ),
+    )
+    # The challans this bill covered are unbilled again: re-generate the master
+    # receipt after fixing whatever was wrong.
+    db.execute("UPDATE pickups SET sale_id = NULL WHERE sale_id = ?", (sale_id,))
+    db.commit()
+
+    due_after = customer_balance(db, sale["customer_id"])
+    message = (
+        f"INV-{sale_id:05d} voided: {CURRENCY} {money(sale['subtotal'])} bill"
+        f" removed from the account. Due went from "
+        f"{CURRENCY} {money(due_before)} to {CURRENCY} {money(due_after)}."
+    )
+    if released:
+        message += (
+            f" {released} challan pickup{'' if released == 1 else 's'} back in"
+            " pending daily bills."
+        )
+    note(message)
+    # Voiding moves money: snapshot it if the hour is up.
+    create_backup()
+    return redirect(back)
 
 
 @app.post("/customers/<int:customer_id>/payments")

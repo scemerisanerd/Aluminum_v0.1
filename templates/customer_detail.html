@@ -161,13 +161,14 @@
       <h3>Purchase history</h3>
       {% if sales %}
         {% for s in sales %}
-        <div class="history-block">
+        <div class="history-block{{ ' is-voided' if s.voided_at }}">
           <div class="history-head">
             <div>
               <a class="link-strong" href="{{ url_for('receipt', sale_id=s.id) }}" target="_blank">
                 INV-{{ '%05d'|format(s.id) }}
               </a>
               <span class="small muted"> • {{ s.created_at }}</span>
+              {% if s.voided_at %}<span class="badge-void">VOID</span>{% endif %}
             </div>
             <div class="small muted">
               Bill {{ CURRENCY }} {{ s.subtotal|money }} •
@@ -178,6 +179,20 @@
               {% if s.round_off > 0 %} • Round-off {{ CURRENCY }} {{ s.round_off|money }}{% endif %}
             </div>
           </div>
+          {% if s.voided_at %}
+          <p class="void-note small">
+            Voided {{ s.voided_at }} — {{ s.void_reason }}.
+            Kept on the record, but not in the due balance or Daily Sales.
+          </p>
+          {% else %}
+          <form method="post" action="{{ url_for('void_sale', sale_id=s.id) }}"
+                class="void-form no-print"
+                onsubmit="return confirm('Void INV-{{ '%05d'|format(s.id) }}? The bill stays on record, but it stops counting in the customer due and Daily Sales.');">
+            <input class="input input-small" type="text" name="reason" maxlength="200"
+                   placeholder="Reason (wrong weight, wrong customer…)">
+            <button type="submit" class="btn btn-small btn-ghost btn-danger">Void receipt</button>
+          </form>
+          {% endif %}
           <table class="data-table data-table-compact">
             <thead>
               <tr>

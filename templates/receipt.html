@@ -23,6 +23,12 @@
   <section class="receipt-copy {{ extra_class }}">
     <div class="copy-banner">{{ copy_label }}</div>
 
+    {% if sale.voided_at %}
+    <div class="void-banner">
+      ** VOID ** {{ sale.voided_at }}<br>{{ sale.void_reason }}
+    </div>
+    {% endif %}
+
     <header class="receipt-header">
       <img class="receipt-logo" src="{{ url_for('static', filename='img/logo.webp') }}" alt="{{ SHOP.name }} logo">
       <h1>{{ SHOP.name }}</h1>
@@ -154,6 +160,15 @@
       <a class="btn" href="{{ url_for('customer_detail', customer_id=customer.id) }}">Customer ledger</a>
     {% endif %}
     <button class="btn btn-primary" onclick="window.print()">Print receipt</button>
+    {% if not sale.voided_at %}
+    <form method="post" action="{{ url_for('void_sale', sale_id=sale.id) }}" class="receipt-void-form no-print"
+          onsubmit="return confirm('Void this receipt? It stays on record, but stops counting in the customer due and Daily Sales.');">
+      <input type="hidden" name="back" value="receipt">
+      <input class="void-reason" type="text" name="reason" maxlength="200"
+             placeholder="Reason (wrong weight, wrong customer…)">
+      <button type="submit" class="btn btn-danger">Void receipt</button>
+    </form>
+    {% endif %}
   </div>
 
   <div class="receipt-sheet">

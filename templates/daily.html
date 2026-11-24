@@ -1,28 +1,34 @@
 {% extends "base.html" %}
 {% block body_class %}daily-page{% endblock %}
-{% block title %}Daily Sales — {{ day_label }}{% endblock %}
+{% block title %}Daily Sales — {{ range_label }}{% endblock %}
 
 {% block content %}
 <div class="daily-print-head print-only">
   <h1>{{ SHOP.name }}</h1>
-  <p>Daily Sales Summary — {{ day_label }}</p>
+  <p>Daily Sales Summary — {{ range_label }}</p>
 </div>
 
 <section class="page-head">
   <div>
     <h2>Daily Sales</h2>
-    <p class="muted daily-sub">{{ day_label }} — weight and revenue for every product sold that day.</p>
+    <p class="muted daily-sub">{{ range_label }} — weight and revenue for every product sold in that period.</p>
   </div>
   <form class="date-form no-print" method="get" action="{{ url_for('daily_summary') }}">
     <input type="hidden" name="sort" value="{{ sort }}">
-    <label for="daily-date">Report date
-      <input type="date" id="daily-date" name="date" value="{{ day_iso }}"
+    <label for="daily-from">From
+      <input type="date" id="daily-from" name="from" value="{{ start_iso }}"
+             max="{{ today_iso }}" onchange="this.form.submit()">
+    </label>
+    <label for="daily-to">To
+      <input type="date" id="daily-to" name="to" value="{{ end_iso }}"
              max="{{ today_iso }}" onchange="this.form.submit()">
     </label>
     <button type="submit" class="btn btn-small">Show</button>
-    {% if day_iso != today_iso %}
+    {% if not is_today %}
       <a class="btn btn-small btn-ghost" href="{{ url_for('daily_summary', sort=sort) }}">Today</a>
     {% endif %}
+    <a class="btn btn-small btn-ghost"
+       href="{{ url_for('daily_summary', sort=sort, **{'from': month_start_iso, 'to': today_iso}) }}">This month</a>
     <button type="button" class="btn btn-primary" onclick="window.print()">Print Daily Report</button>
   </form>
 </section>
@@ -39,12 +45,17 @@
     <span>Total sales value</span>
     <b>{{ CURRENCY }} {{ totals.sales|money }}</b>
     <div class="daily-breakdown">
-      <div><span>Cash collected</span><b>{{ CURRENCY }} {{ totals.cash|money }}</b></div>
+      <div><span>Cash collected</span><b>{{ CURRENCY }} {{ cash_collected|money }}</b></div>
       <div><span>New due</span><b>{{ CURRENCY }} {{ totals.due|money }}</b></div>
       {% if totals.scrap > 0 %}
       <div><span>Scrap received</span><b>{{ CURRENCY }} {{ totals.scrap|money }}</b></div>
       {% endif %}
     </div>
+    <em class="daily-note">
+      Cash collected is bills {{ CURRENCY }} {{ totals.cash_on_bills|money }}
+      {% if due_payment_count %}plus {{ due_payment_count }} due payment{{ '' if due_payment_count == 1 else 's' }}
+      {{ CURRENCY }} {{ due_payments|money }} taken on the customer page{% else %}and no due payments{% endif %}.
+    </em>
   </div>
   <div class="mini-stat">
     <span>Receipts / orders</span>
@@ -53,7 +64,10 @@
       {% if totals.receipts %}
         Average bill {{ CURRENCY }} {{ avg_bill|money }}
       {% else %}
-        No receipts this day
+        No receipts in this period
+      {% endif %}
+      {% if voided_today %}
+      <br>{{ voided_today }} voided receipt{{ '' if voided_today == 1 else 's' }} excluded
       {% endif %}
     </em>
   </div>
@@ -65,9 +79,9 @@
     <div class="sort-toggle no-print">
       <span class="small muted">Sort by</span>
       <a class="sort-chip {{ 'is-active' if sort == 'weight' }}"
-         href="{{ url_for('daily_summary', date=day_iso, sort='weight') }}">Weight sold</a>
+         href="{{ url_for('daily_summary', sort='weight', **{'from': start_iso, 'to': end_iso}) }}">Weight sold</a>
       <a class="sort-chip {{ 'is-active' if sort == 'revenue' }}"
-         href="{{ url_for('daily_summary', date=day_iso, sort='revenue') }}">Revenue</a>
+         href="{{ url_for('daily_summary', sort='revenue', **{'from': start_iso, 'to': end_iso}) }}">Revenue</a>
     </div>
   </div>
 
@@ -100,11 +114,12 @@
     </tfoot>
   </table>
   {% else %}
-    <p class="empty">No sales recorded on {{ day_label }}.</p>
+    <p class="empty">No sales recorded on {{ range_label }}.</p>
   {% endif %}
 </section>
 
 <p class="daily-print-foot print-only">
   Printed {{ printed_at }} &nbsp;•&nbsp; {{ totals.receipts }} receipt{{ '' if totals.receipts == 1 else 's' }}
+  &nbsp;•&nbsp; Cash collected {{ CURRENCY }} {{ cash_collected|money }}
 </p>
 {% endblock %}
