@@ -303,6 +303,83 @@ class SmokeTest(unittest.TestCase):
         self.assertAlmostEqual(self.account()["due"], 1000.00, places=2)
         self.assertEqual(self.money_after(self.daily(), "Total sales value"), 1500.00)
 
+    def test_two_different_bills_at_once_keep_both_dues(self):
+        """Two bills for one customer saved at once lose neither balance.
+
+        Each bill carries the due the other one left behind, so the account
+        after both is the sum of both, and the second bill's grand total
+        includes the first bill's due. That only holds if the account is read
+        inside the write transaction; read before it, both bills would take the
+        same old due and one of them would be lost.
+        """
+        sheet = {
+            "customer_id": self.customer_id,
+            "items": [{"product_id": self.product["Smoke Sheet"], "weight_kg": 5}],
+            "paid": 500,
+        }
+        pipe = {
+            "customer_id": self.customer_id,
+            "items": [{"product_id": self.product["Smoke Pipe"], "weight_kg": 2}],
+            "paid": 0,
+        }
+        barrier = threading.Barrier(2, timeout=15)
+        answers = []
+        failures = []
+        lock = threading.Lock()
+
+        def submit(payload):
+            client = pos.app.test_client()
+            try:
+                barrier.wait()
+                response = client.post("/api/sales", json=payload)
+                with lock:
+                    answers.append(response)
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                with lock:
+                    failures.append(exc)
+
+        threads = [
+            threading.Thread(target=submit, args=(payload,))
+            for payload in (sheet, pipe)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(answers), 2, "both requests must have answered")
+        self.assertEqual(
+            [response.status_code for response in answers],
+            [201, 201],
+            "both bills must save: "
+            + " | ".join(response.get_data(as_text=True) for response in answers),
+        )
+
+        sales = self.rows("SELECT * FROM sales ORDER BY id")
+        self.assertEqual(len(sales), 2)
+        # The first bill opened on a clean account, whichever bill it was; the
+        # second carries the due the first one left behind.
+        first, second = sales
+        self.assertEqual(round(first["previous_due"], 2), 0.00)
+        self.assertAlmostEqual(
+            second["previous_due"],
+            first["new_due"],
+            places=2,
+            msg="the second bill must carry the first bill's due",
+        )
+        for row in sales:
+            self.assertAlmostEqual(
+                row["grand_total"],
+                round(row["subtotal"] + row["previous_due"], 2),
+                places=2,
+                msg="each bill must carry the due the other left behind",
+            )
+
+        # Neither due was dropped: 1000 from the sheet bill, 500 from the pipe.
+        self.assertAlmostEqual(self.account()["due"], 1500.00, places=2)
+        self.assertEqual(self.money_after(self.daily(), "Total sales value"), 2000.00)
+
     def test_prices_come_from_the_shop_not_the_browser(self):
         response = self.client.post(
             "/api/sales",

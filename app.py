@@ -1967,29 +1967,6 @@ def record_sale(
         sum(float(part.get("value") or 0) for part in scrap.values()), 2
     )
 
-    account = customer_account(db, customer_id)
-    previous_due = account["due"]
-    credit_before = account["credit"]
-    gross_total = round(subtotal + previous_due, 2)
-    # Credit already on the account comes off this bill before anything is
-    # collected, so it is never forgotten.
-    credit_used = round(min(credit_before, gross_total), 2)
-    grand_total = round(gross_total - credit_used, 2)
-    # Scrap covers what the credit did not. Any scrap left over stays on the
-    # account as credit for the next bill instead of being written off.
-    scrap_applied = round(min(scrap_total, grand_total), 2)
-    scrap_credit = round(scrap_total - scrap_applied, 2)
-    cash_needed = round(grand_total - scrap_applied, 2)
-    # Cash above the amount needed is change handed back, never credit.
-    cash_applied = round(min(paid, cash_needed), 2)
-    change = round(paid - cash_applied, 2)
-    remainder = round(cash_needed - cash_applied, 2)
-    # A small leftover the shop chooses to waive is settled on this bill: it is
-    # never allowed to exceed the real remainder and never becomes customer due.
-    round_off = round(min(max(0.0, requested_round_off), remainder), 2)
-    new_due = round(remainder - round_off, 2)
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     black = scrap.get("Black", {})
     white = scrap.get("White", {})
 
@@ -2015,6 +1992,34 @@ def record_sale(
                 answer = sale_response(repeated)
                 answer["duplicate"] = True
                 return answer
+
+        # The account is read here, inside the write transaction, for the same
+        # reason. A second bill for this customer saved at the same moment
+        # waits for this transaction to commit, then takes its previous due
+        # from the balance this bill left behind. Read before the lock, both
+        # bills would see the same old due and one of them would be lost.
+        account = customer_account(db, customer_id)
+        previous_due = account["due"]
+        credit_before = account["credit"]
+        gross_total = round(subtotal + previous_due, 2)
+        # Credit already on the account comes off this bill before anything is
+        # collected, so it is never forgotten.
+        credit_used = round(min(credit_before, gross_total), 2)
+        grand_total = round(gross_total - credit_used, 2)
+        # Scrap covers what the credit did not. Any scrap left over stays on the
+        # account as credit for the next bill instead of being written off.
+        scrap_applied = round(min(scrap_total, grand_total), 2)
+        scrap_credit = round(scrap_total - scrap_applied, 2)
+        cash_needed = round(grand_total - scrap_applied, 2)
+        # Cash above the amount needed is change handed back, never credit.
+        cash_applied = round(min(paid, cash_needed), 2)
+        change = round(paid - cash_applied, 2)
+        remainder = round(cash_needed - cash_applied, 2)
+        # A small leftover the shop chooses to waive is settled on this bill: it
+        # is never allowed to exceed the real remainder and never becomes due.
+        round_off = round(min(max(0.0, requested_round_off), remainder), 2)
+        new_due = round(remainder - round_off, 2)
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         cur = db.execute(
             "INSERT INTO sales (customer_id, subtotal, previous_due, grand_total,"
