@@ -9,3 +9,7 @@ data/*.db-shm
 backups/
 server.log
 .DS_Store
+
+# Local UI screenshots captured while checking layouts — not part of the app.
+/*.png
+/*.jpg
