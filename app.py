@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 from flask import (
     Flask,
@@ -66,6 +67,20 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = "local-pos-offline-key"
 # Flask 3 sorts JSON keys through app.json, not the old config key.
 app.json.sort_keys = False
+
+
+@app.before_request
+def refuse_cross_site_writes():
+    """There is no login, so another website must not POST to the till.
+
+    A browser always sends Origin on a cross-site form or fetch; same-origin
+    writes carry this app's own origin and pass. Requests without the header
+    (the smoke test, curl) are local tools, not a page in a browser.
+    """
+    if request.method in ("POST", "PUT", "DELETE"):
+        origin = request.headers.get("Origin")
+        if origin and urlsplit(origin).netloc != request.host:
+            abort(403)
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +281,9 @@ CREATE TABLE IF NOT EXISTS day_closes (
     expected_cash REAL NOT NULL DEFAULT 0,
     counted_cash  REAL NOT NULL DEFAULT 0,
     due_added     REAL NOT NULL DEFAULT 0,
+    -- Kilos the day closed on; -1 means "not recorded" on a row from before
+    -- this was stored, and is never compared.
+    weight        REAL NOT NULL DEFAULT -1,
     note          TEXT NOT NULL DEFAULT '',
     closed_at     TEXT NOT NULL
 );
@@ -338,6 +356,10 @@ PICKUP_CANCEL_COLUMNS = (
 SALE_METHOD_COLUMNS = (
     ("payment_method", "TEXT NOT NULL DEFAULT 'Cash'"),
 )
+
+# A close remembers the day's kilos, so cancelling a challan afterwards shows
+# up as a change instead of quietly rewriting a day that was already counted.
+DAY_CLOSE_WEIGHT_COLUMNS = (("weight", "REAL NOT NULL DEFAULT -1"),)
 
 # Cash paid out for scrap instead of left as credit.
 SCRAP_PAYOUT_COLUMNS = (
@@ -475,6 +497,7 @@ def init_db():
         con, "scrap_payments", SCRAP_PAYOUT_COLUMNS + VOID_COLUMNS
     )
     add_missing_columns(con, "ledger_adjustments", VOID_COLUMNS)
+    add_missing_columns(con, "day_closes", DAY_CLOSE_WEIGHT_COLUMNS)
     add_missing_columns(con, "products", PRODUCT_COST_COLUMNS)
 
     con.executemany(
@@ -493,12 +516,13 @@ def init_db():
 BACKUP_LOCK = threading.Lock()
 
 
-def backup_files():
-    """Existing backup files, newest first."""
+def backup_files(directory=None):
+    """Existing backup files in a folder (default backups/), newest first."""
+    folder = directory or BACKUP_DIR
     try:
         names = [
             name
-            for name in os.listdir(BACKUP_DIR)
+            for name in os.listdir(folder)
             if name.startswith(BACKUP_PREFIX) and name.endswith(".db")
         ]
     except OSError:
@@ -507,7 +531,7 @@ def backup_files():
     # still sort in the order they were written).
     entries = []
     for name in names:
-        path = os.path.join(BACKUP_DIR, name)
+        path = os.path.join(folder, name)
         try:
             entries.append((os.path.getmtime(path), name, path))
         except OSError:
@@ -532,9 +556,9 @@ def backup_is_due():
         return True
 
 
-def prune_backups(keep=BACKUP_KEEP):
+def prune_backups(keep=BACKUP_KEEP, directory=None):
     """Delete all but the newest `keep` snapshots so the disk never fills up."""
-    for path in backup_files()[keep:]:
+    for path in backup_files(directory)[keep:]:
         try:
             os.remove(path)
         except OSError as exc:
@@ -593,6 +617,9 @@ def create_backup(force=False):
             try:
                 os.makedirs(second, exist_ok=True)
                 shutil.copy2(target, os.path.join(second, os.path.basename(target)))
+                # The other drive rotates on the same budget: an hourly copy kept
+                # there for months would otherwise fill that disk.
+                prune_backups(directory=second)
             except OSError as exc:
                 print(f"Second backup copy failed: {exc}")
 
@@ -803,6 +830,27 @@ def due_age(db, customers):
         customer_id: {name: round(value, 2) for name, value in buckets.items()}
         for customer_id, buckets in ages.items()
     }
+
+
+def weight_sold(db, start_iso, end_iso):
+    """Kilos that left the shop in a date range: billed lines plus challans.
+
+    A master receipt built from challans adds no weight of its own, so no kilo
+    is counted twice.
+    """
+    billed = db.execute(
+        "SELECT COALESCE(SUM(si.weight_kg), 0) FROM sale_items si"
+        " JOIN sales s ON s.id = si.sale_id"
+        " WHERE date(s.created_at) BETWEEN ? AND ?"
+        " AND s.voided_at IS NULL AND s.pickup_billed = 0",
+        (start_iso, end_iso),
+    ).fetchone()[0]
+    picked = db.execute(
+        "SELECT COALESCE(SUM(weight_kg), 0) FROM pickups"
+        " WHERE picked_on BETWEEN ? AND ? AND cancelled_at IS NULL",
+        (start_iso, end_iso),
+    ).fetchone()[0]
+    return round(float(billed or 0) + float(picked or 0), 3)
 
 
 def day_cash(db, day_iso):
@@ -1084,6 +1132,15 @@ def daily_summary():
                     ("due_added", "due_added"),
                 )
             )
+            # Weight moves no cash, so a challan cancelled or restored after the
+            # close would otherwise rewrite the day's kilos unseen.
+            stored_weight = float(close["weight"])
+            if (
+                not close_changed
+                and stored_weight >= 0
+                and abs(stored_weight - weight_sold(db, start_iso, start_iso)) >= 0.0005
+            ):
+                close_changed = True
 
     # Weight is counted on the day the goods left the shop: a weight-only
     # challan adds its kg on the pickup day, and the master receipt built from
@@ -1193,6 +1250,9 @@ def close_day():
     if day is None:
         note("Pick the day being closed.", "error")
         return redirect(url_for("daily_summary"))
+    if day > datetime.now().date():
+        note("That day has not happened yet, so it cannot be closed.", "error")
+        return redirect(url_for("daily_summary"))
     counted = finite_number(request.form.get("counted_cash"))
     if counted is None or counted < 0:
         note("Counted cash must be a number of 0 or more.", "error")
@@ -1206,12 +1266,13 @@ def close_day():
     note_text = (request.form.get("note") or "").strip()[:200]
     db.execute(
         "INSERT INTO day_closes (day, cash_in, payouts, expected_cash,"
-        " counted_cash, due_added, note, closed_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        " counted_cash, due_added, weight, note, closed_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(day) DO UPDATE SET cash_in = excluded.cash_in,"
         " payouts = excluded.payouts, expected_cash = excluded.expected_cash,"
         " counted_cash = excluded.counted_cash, due_added = excluded.due_added,"
-        " note = excluded.note, closed_at = excluded.closed_at",
+        " weight = excluded.weight, note = excluded.note,"
+        " closed_at = excluded.closed_at",
         (
             day_iso,
             cash["drawer_in"],
@@ -1219,6 +1280,7 @@ def close_day():
             cash["expected"],
             counted,
             cash["due_added"],
+            weight_sold(db, day_iso, day_iso),
             note_text,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ),
@@ -1346,11 +1408,18 @@ def customer_detail(customer_id):
         balance=account["due"],
         credit=account["credit"],
         total_billed=sum(s["subtotal"] for s in live_sales),
+        # Only money that actually settled this account, and only live rows: a
+        # voided payment never paid anything, and scrap paid out in cash never
+        # paid the due.
         total_paid=sum(s["cash_applied"] for s in live_sales)
         + sum(s["scrap_total"] for s in live_sales)
         + sum(s["round_off"] for s in live_sales)
-        + sum(p["amount"] for p in payments)
-        + sum(e["total"] for e in scrap_entries),
+        + sum(p["amount"] for p in payments if p["voided_at"] is None)
+        + sum(
+            e["total"] - e["payout"]
+            for e in scrap_entries
+            if e["voided_at"] is None
+        ),
     )
 
 

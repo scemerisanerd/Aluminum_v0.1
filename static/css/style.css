@@ -376,9 +376,9 @@ kbd {
 .change-row {
   background: var(--ok-soft); border: 1px solid var(--ok-line);
   border-radius: var(--radius-sm); padding: 10px 12px; margin-top: 6px;
-  color: #065f46; font-weight: 600;
+  color: var(--ok); font-weight: 600;
 }
-.change-row b { color: #065f46; font-size: 17px; }
+.change-row b { color: var(--ok); font-size: 17px; }
 .roundoff-box {
   margin: 12px 0; padding: 14px; border-radius: var(--radius);
   border: 1px dashed var(--line); background: #fbfdff;

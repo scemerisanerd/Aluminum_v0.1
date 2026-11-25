@@ -391,6 +391,31 @@ class SmokeTest(unittest.TestCase):
         self.assertAlmostEqual(self.account()["due"], 1500.00, places=2)
         self.assertEqual(self.money_after(self.daily(), "Total sales value"), 2000.00)
 
+    def test_a_foreign_site_cannot_post_to_the_till(self):
+        """No login here, so a page from another origin must be refused."""
+        blocked = self.client.post(
+            "/api/sales",
+            json={
+                "customer_id": self.customer_id,
+                "items": [{"product_id": self.product["Smoke Pipe"], "weight_kg": 1}],
+                "paid": 0,
+            },
+            headers={"Origin": "http://evil.example"},
+        )
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sales"), 0)
+
+        allowed = self.client.post(
+            "/api/sales",
+            json={
+                "customer_id": self.customer_id,
+                "items": [{"product_id": self.product["Smoke Pipe"], "weight_kg": 1}],
+                "paid": 0,
+            },
+            headers={"Origin": "http://localhost"},  # the test client's own host
+        )
+        self.assertNotEqual(allowed.status_code, 403)
+
     def test_prices_come_from_the_shop_not_the_browser(self):
         response = self.client.post(
             "/api/sales",
@@ -998,6 +1023,64 @@ class SmokeTest(unittest.TestCase):
         self.assertIsNone(self.one("SELECT * FROM day_closes WHERE day = ?", (day,)))
         self.assertNotIn("Changed since close", self.daily())
 
+    def test_day_close_flags_a_challan_cancelled_afterwards(self):
+        """Weight moves no cash, so a closed day must watch its kilos too."""
+        slip = self.client.post(
+            "/api/challans",
+            json={
+                "customer_id": self.customer_id,
+                "items": [
+                    {"product_id": self.product["Smoke Sheet"], "weight_kg": 4},
+                    {"product_id": self.product["Smoke Pipe"], "weight_kg": 2},
+                ],
+            },
+        )
+        self.assertEqual(slip.status_code, 201, slip.get_data(as_text=True))
+        day = self.today()
+        self.client.post("/daily/close", data={"day": day, "counted_cash": "0"})
+        close = self.one("SELECT * FROM day_closes WHERE day = ?", (day,))
+        self.assertAlmostEqual(close["weight"], 6.000, places=3)
+        self.assertNotIn("Changed since close", self.daily())
+
+        pickup_id = self.scalar(
+            "SELECT id FROM pickups WHERE challan_no = ?", (slip.get_json()["challan_no"],)
+        )
+        self.client.post(f"/pickups/{pickup_id}/cancel")
+        self.assertIn(
+            "Changed since close",
+            self.daily(),
+            "a challan cancelled after the close changes the day's weight",
+        )
+        self.assertAlmostEqual(
+            self.one("SELECT weight FROM day_closes WHERE day = ?", (day,))["weight"],
+            6.000,
+            places=3,
+            msg="the snapshot keeps what the day closed on",
+        )
+
+    def test_total_paid_skips_voided_rows_and_scrap_cash(self):
+        """The profile's Total paid is money that settled the account, only."""
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 1000)
+        self.client.post(
+            f"/customers/{self.customer_id}/payments",
+            data={"amount": "300", "method": "Cash"},
+        )
+        payment_id = self.scalar("SELECT MAX(id) FROM payments")
+        self.client.post(
+            f"/payments/{payment_id}/void", data={"reason": "wrong amount"}
+        )
+        self.client.post(
+            f"/customers/{self.customer_id}/scrap",
+            data={"black_kg": "1", "payout": "100", "method": "Cash"},
+        )
+
+        html = self.client.get(f"/customers/{self.customer_id}").get_data(as_text=True)
+        found = re.search(r"Total paid</span><b>Tk\. ([\d,]+\.\d\d)</b>", html)
+        self.assertIsNotNone(found, "no Total paid figure on the customer profile")
+        # 1000 cash on the bill + 90 of scrap left against the due. The voided
+        # 300 payment and the 100 paid out for the scrap settle nothing.
+        self.assertEqual(float(found.group(1).replace(",", "")), 1090.00)
+
     # --- receipts, ageing and statements -----------------------------------
 
     def test_receipts_page_filters_by_customer_amount_and_status(self):
@@ -1149,6 +1232,20 @@ class SmokeTest(unittest.TestCase):
         self.assertTrue(
             (pathlib.Path(pos.BACKUP_DIR) / copies[0].name).exists(),
             "and still exist in the normal backups folder",
+        )
+
+        # The other drive rotates too, or a copy every hour fills it up.
+        for index in range(80):
+            (second / f"shop_2020-01-01_00-{index:02d}.db").write_bytes(b"old")
+        self.client.post("/backup/now")
+        self.assertLessEqual(
+            len(list(second.glob("shop_*.db"))),
+            pos.BACKUP_KEEP,
+            "the second folder must keep only the newest snapshots",
+        )
+        self.assertTrue(
+            list(second.glob("*.db")),
+            "rotation must never empty the second folder",
         )
 
     # --- the real shop file ------------------------------------------------
