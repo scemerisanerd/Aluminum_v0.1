@@ -1,0 +1,82 @@
+/* Customer statement: a plain A4 sheet for handing to the customer. It loads
+   after style.css so its @page rule wins on this page only (the thermal 80mm
+   receipts and Daily Sales roll keep their own size). */
+.statement-toolbar {
+  max-width: 860px;
+  margin: 0 auto 18px;
+}
+.statement-sheet {
+  max-width: 860px;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 32px 34px 26px;
+  color: var(--ink);
+}
+.statement-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid var(--ink);
+}
+.statement-head h1 { font-size: 18px; margin: 0 0 4px; letter-spacing: .02em; }
+.statement-head h2 { font-size: 15px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: .08em; }
+.statement-head p { margin: 0; font-size: 12px; color: var(--ink-soft); }
+.statement-title { text-align: right; white-space: nowrap; }
+.statement-parties {
+  display: flex; justify-content: space-between; gap: 24px;
+  padding: 14px 0 10px; font-size: 13px;
+}
+.statement-parties p { margin: 2px 0 0; color: var(--ink-soft); font-size: 12px; }
+.statement-parties > div:last-child { text-align: right; }
+.statement-label {
+  display: block; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--ink-soft); font-weight: 700;
+}
+.statement-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.statement-table th {
+  text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--ink-soft); padding: 7px 8px; border-bottom: 1px solid var(--ink);
+}
+.statement-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); }
+.statement-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.statement-table tfoot td {
+  border-top: 1px solid var(--ink); border-bottom: 0; font-weight: 700; padding-top: 9px;
+}
+.statement-opening td { color: var(--ink-soft); font-style: italic; }
+.statement-kind {
+  display: inline-block; margin-left: 5px; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--ink-soft);
+}
+.statement-note { color: var(--ink-soft); }
+.statement-empty { text-align: center; color: var(--ink-soft); font-style: italic; padding: 18px; }
+.statement-foot {
+  margin-top: 16px; padding-top: 10px; border-top: 1px dashed var(--line);
+  font-size: 11px; color: var(--ink-soft);
+}
+.statement-foot p { margin: 3px 0; }
+.statement-foot b { color: var(--ink); }
+
+@media print {
+  @page { size: A4 portrait; margin: 14mm; }
+
+  html, body { background: #fff; }
+  body.statement-page { width: auto; font-size: 10.5pt; color: #000; }
+  body.statement-page .app-header,
+  body.statement-page .app-footer,
+  body.statement-page .flashes,
+  body.statement-page .statement-toolbar { display: none !important; }
+  body.statement-page .app-main { max-width: none; margin: 0; padding: 0; }
+  .statement-sheet {
+    max-width: none; border: 0; border-radius: 0; box-shadow: none; padding: 0;
+  }
+  .statement-head { border-bottom-color: #000; }
+  .statement-table th { border-bottom-color: #000; }
+  .statement-table tfoot td { border-top-color: #000; }
+  .statement-table tbody tr { break-inside: avoid; page-break-inside: avoid; }
+  .statement-sheet * { color: #000 !important; }
+  .statement-head p, .statement-note, .statement-kind, .statement-foot { color: #333 !important; }
+}

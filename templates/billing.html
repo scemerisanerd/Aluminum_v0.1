@@ -233,6 +233,11 @@
         Amount paid today ({{ CURRENCY }})
         <input class="input input-lg" type="number" id="paid" step="0.01" min="0" value="0.00">
       </label>
+      <fieldset class="segmented" id="payment-method" aria-label="How the payment arrived">
+        {% for name in ['Cash', 'bKash', 'Bank'] %}
+        <label><input type="radio" name="payment_method" value="{{ name }}" {{ 'checked' if loop.first }}><span>{{ name }}</span></label>
+        {% endfor %}
+      </fieldset>
       <div class="total-row remainder-row">
         <span>Remainder / Difference</span>
         <b id="remainder">{{ CURRENCY }} 0.00</b>

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Aluminum Wholesale POS{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}" data-currency="{{ CURRENCY }}">
   <header class="app-header no-print">
@@ -20,11 +21,12 @@
         <a href="{{ url_for('billing') }}" class="tab {{ 'is-active' if active == 'billing' }}">New Receipt</a>
         <a href="{{ url_for('products') }}" class="tab {{ 'is-active' if active == 'products' }}">Products</a>
         <a href="{{ url_for('daily_summary') }}" class="tab {{ 'is-active' if active == 'daily' }}">Daily Sales</a>
+        <a href="{{ url_for('receipts') }}" class="tab {{ 'is-active' if active == 'receipts' }}">Receipts</a>
         <a href="{{ url_for('customers') }}" class="tab {{ 'is-active' if active == 'customers' }}">Customers &amp; Due</a>
       </nav>
       <div class="data-tools">
-        <a href="{{ url_for('download_backup') }}" class="tab-data"
-           title="Save a timestamped copy of data/shop.db to your Downloads folder">Download Backup (.db)</a>
+        <a href="{{ url_for('backups') }}" class="tab-data"
+           title="Backups, restore, and a second copy folder">Backups &amp; Restore</a>
         <a href="{{ url_for('export_customers_csv') }}" class="tab-data"
            title="Customer due list as a spreadsheet file">Export Customers &amp; Dues (.csv)</a>
       </div>

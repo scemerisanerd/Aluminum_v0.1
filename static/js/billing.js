@@ -87,6 +87,12 @@
     n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+  // How the cash on this bill arrived; the server never trusts it for money.
+  function paymentMethod() {
+    const picked = document.querySelector("#payment-method input:checked");
+    return picked ? picked.value : "Cash";
+  }
+
   function setStatus(message, isError) {
     el.status.textContent = message || "";
     el.status.style.color = isError ? "#c62f3c" : "#147a52";
@@ -660,6 +666,7 @@
           scrap: scrap,
           paid: paid,
           round_off: roundOff,
+          payment_method: paymentMethod(),
           draft_id: state.draftId || null,
         }),
       });

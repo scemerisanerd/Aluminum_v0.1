@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Receipts{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <h2>Receipts</h2>
+    <p class="muted">Find any saved bill by date, customer or amount, and print it again.</p>
+  </div>
+  <div class="stat-chip stat-chip-strong">
+    <span>{{ CURRENCY }} {{ total_value|money }}</span> in {{ receipts|length }} receipt{{ '' if receipts|length == 1 else 's' }}
+  </div>
+</section>
+
+<section class="card">
+  <form class="filter-form receipts-filter" method="get" action="{{ url_for('receipts') }}">
+    <label for="receipts-from">From
+      <input type="date" id="receipts-from" name="from" value="{{ start_iso }}" max="{{ end_iso }}">
+    </label>
+    <label for="receipts-to">To
+      <input type="date" id="receipts-to" name="to" value="{{ end_iso }}">
+    </label>
+    <label for="receipts-q">Customer or invoice
+      <input type="search" id="receipts-q" name="q" value="{{ search }}"
+             placeholder="Name, phone, shop or 42" autocomplete="off">
+    </label>
+    <label for="receipts-amount">Bill amount ({{ CURRENCY }})
+      <input type="number" id="receipts-amount" name="amount" step="0.01" min="0"
+             value="{{ amount }}" placeholder="any">
+    </label>
+    <label for="receipts-status">Status
+      <select id="receipts-status" name="status" class="input input-select">
+        <option value="all" {{ 'selected' if status == 'all' }}>All</option>
+        <option value="live" {{ 'selected' if status == 'live' }}>Live only</option>
+        <option value="void" {{ 'selected' if status == 'void' }}>Voided only</option>
+      </select>
+    </label>
+    <button type="submit" class="btn btn-small btn-primary">Find</button>
+    {% if search or amount or status != 'all' %}
+      <a class="btn btn-small btn-ghost" href="{{ url_for('receipts') }}">Clear</a>
+    {% endif %}
+  </form>
+
+  {% if receipts %}
+  <table class="data-table receipts-table">
+    <thead>
+      <tr>
+        <th>Invoice</th>
+        <th>Date</th>
+        <th>Customer</th>
+        <th class="num">Bill ({{ CURRENCY }})</th>
+        <th class="num">Paid ({{ CURRENCY }})</th>
+        <th class="num">Due after</th>
+        <th>Method</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in receipts %}
+      <tr class="{{ 'row-voided' if r.voided_at }}">
+        <td>
+          <a class="link-strong" href="{{ url_for('receipt', sale_id=r.id) }}">
+            INV-{{ '%05d'|format(r.id) }}
+          </a>
+          {% if r.voided_at %}<span class="badge-void">VOID</span>{% endif %}
+        </td>
+        <td class="small muted">{{ r.created_at[:16] }}</td>
+        <td>{{ r.customer_name }}</td>
+        <td class="num">{{ r.subtotal|money }}</td>
+        <td class="num">{{ r.cash_applied|money }}</td>
+        <td class="num">{{ r.new_due|money }}</td>
+        <td><span class="method-chip">{{ r.payment_method }}</span></td>
+        <td class="actions">
+          <div class="row-actions">
+            <a class="btn btn-small" href="{{ url_for('receipt', sale_id=r.id) }}">Open</a>
+            <a class="btn btn-small btn-ghost" target="_blank"
+               href="{{ url_for('receipt', sale_id=r.id, print=1) }}">Reprint</a>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="empty">No receipts match that search between {{ start_iso }} and {{ end_iso }}.</p>
+  {% endif %}
+</section>
+{% endblock %}

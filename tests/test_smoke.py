@@ -22,6 +22,7 @@ never written to.
 """
 
 import hashlib
+import io
 import pathlib
 import re
 import shutil
@@ -31,6 +32,7 @@ import tempfile
 import threading
 import unittest
 from contextlib import contextmanager
+from datetime import datetime
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -65,6 +67,9 @@ def setUpModule():
         source.close()
     pos.DB_PATH = str(copy)
     pos.BACKUP_DIR = str(TMP / "backups")
+    # The restore probe file is written next to the data folder, so send that
+    # to the temp directory too.
+    pos.DATA_DIR = str(TMP)
     pos.init_db()
 
 
@@ -116,9 +121,12 @@ class SmokeTest(unittest.TestCase):
                 "payments",
                 "scrap_payments",
                 "ledger_adjustments",
+                "credit_payouts",
                 "draft_receipts",
                 "customer_rates",
                 "scrap_rates",
+                "purchases",
+                "day_closes",
                 "products",
                 "customers",
             ):
@@ -158,7 +166,10 @@ class SmokeTest(unittest.TestCase):
         return self.one("SELECT * FROM sales WHERE id = ?", (sale_id,))
 
     def today(self):
-        return self.one("SELECT date('now') AS d")["d"]
+        # The app stamps rows with the local clock, so the test must read the
+        # same clock. SQLite's date('now') is UTC and drags a day behind after
+        # local midnight.
+        return datetime.now().strftime("%Y-%m-%d")
 
     def daily(self, query=""):
         response = self.client.get("/daily" + query)
@@ -175,7 +186,7 @@ class SmokeTest(unittest.TestCase):
     def money_after(self, html, label):
         """The Tk. figure rendered on the Daily Sales card for `label`."""
         found = re.search(
-            re.escape(label) + r"</span>\s*<b>Tk\. ([\d,]+\.\d\d)</b>", html
+            re.escape(label) + r"</span>\s*<b>Tk\. (-?[\d,]+\.\d\d)</b>", html
         )
         self.assertIsNotNone(found, f"no {label} figure on the Daily Sales page")
         return float(found.group(1).replace(",", ""))
@@ -744,6 +755,401 @@ class SmokeTest(unittest.TestCase):
         html = self.daily()
         self.assertEqual(self.money_after(html, "Cash collected"), 3000.00)
         self.assertEqual(self.money_after(html, "Total sales value"), 3000.00)
+
+    # --- voiding money that is not a bill ----------------------------------
+
+    def test_void_payment_needs_a_reason_and_restores_the_due(self):
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 1000)
+        self.client.post(
+            f"/customers/{self.customer_id}/payments",
+            data={"amount": "500", "method": "bKash"},
+        )
+        self.assertAlmostEqual(self.account()["due"], 1500.00, places=2)
+        payment = self.one("SELECT * FROM payments")
+        self.assertEqual(payment["method"], "bKash", "the method must be stored")
+        self.assertIsNone(payment["voided_at"])
+
+        # No reason, no void.
+        self.client.post(f"/payments/{payment['id']}/void", data={"reason": "  "})
+        self.assertIsNone(
+            self.one("SELECT voided_at FROM payments WHERE id = ?", (payment["id"],))[
+                "voided_at"
+            ],
+            "a void without a reason must be refused",
+        )
+        self.assertAlmostEqual(self.account()["due"], 1500.00, places=2)
+
+        self.client.post(f"/payments/{payment['id']}/void", data={"reason": "typo"})
+        voided = self.one("SELECT * FROM payments WHERE id = ?", (payment["id"],))
+        self.assertIsNotNone(voided["voided_at"])
+        self.assertEqual(voided["void_reason"], "typo")
+        self.assertAlmostEqual(voided["amount"], 500.00, places=2, msg="the row stays")
+        self.assertAlmostEqual(self.account()["due"], 2000.00, places=2)
+        # It leaves the day's cash too: only the 1000 on the bill remains.
+        self.assertEqual(
+            self.money_after(self.daily(), "Cash collected"), 1000.00
+        )
+
+    def test_void_scrap_entry_restores_the_account(self):
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 0)
+        self.assertAlmostEqual(self.account()["due"], 3000.00, places=2)
+        self.client.post(
+            f"/customers/{self.customer_id}/scrap",
+            data={"black_kg": "5", "payout": "0", "method": "Cash"},
+        )
+        self.assertAlmostEqual(self.account()["due"], 2050.00, places=2)  # 3000-950
+        entry = self.one("SELECT * FROM scrap_payments")
+
+        self.client.post(f"/scrap-payments/{entry['id']}/void", data={"reason": "wrong kg"})
+        self.assertAlmostEqual(self.account()["due"], 3000.00, places=2)
+        self.assertEqual(
+            self.one("SELECT void_reason FROM scrap_payments")["void_reason"], "wrong kg"
+        )
+
+    def test_scrap_cash_payout_leaves_the_drawer_and_not_the_due_maths(self):
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 0)
+        # 5 kg black scrap = 950; 200 of it paid out in cash, so 750 pays the due.
+        self.client.post(
+            f"/customers/{self.customer_id}/scrap",
+            data={"black_kg": "5", "payout": "200", "method": "Cash"},
+        )
+        self.assertAlmostEqual(self.account()["due"], 2250.00, places=2)
+        self.assertEqual(
+            self.money_after(self.daily(), "Expected in drawer"), -200.00
+        )
+        # More cash than the scrap is worth is refused outright.
+        self.client.post(
+            f"/customers/{self.customer_id}/scrap",
+            data={"black_kg": "1", "payout": "5000"},
+        )
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM scrap_payments"), 1)
+
+    def test_void_ledger_adjustment_removes_the_carried_due(self):
+        self.client.post(
+            f"/customers/{self.customer_id}/opening-due",
+            data={"amount": "1200", "note": "old notebook"},
+        )
+        self.assertAlmostEqual(self.account()["due"], 1200.00, places=2)
+        entry = self.one("SELECT * FROM ledger_adjustments")
+        self.client.post(
+            f"/ledger-adjustments/{entry['id']}/void", data={"reason": "already paid"}
+        )
+        self.assertAlmostEqual(self.account()["due"], 0.00, places=2)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM ledger_adjustments"), 1)
+
+    def test_credit_payout_clears_the_credit_and_is_not_drawer_cash(self):
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 3000)
+        # Nothing is due, so there is no credit to hand back either.
+        self.client.post(
+            f"/customers/{self.customer_id}/payouts", data={"amount": "100"}
+        )
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM credit_payouts"), 0)
+
+        # 5 kg black scrap on a settled bill leaves 950 as credit.
+        self.client.post(
+            f"/customers/{self.customer_id}/scrap", data={"black_kg": "5"}
+        )
+        self.assertAlmostEqual(self.account()["credit"], 950.00, places=2)
+
+        # More than the credit is refused: no payout becomes new due.
+        self.client.post(
+            f"/customers/{self.customer_id}/payouts",
+            data={"amount": "1200", "method": "Cash"},
+        )
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM credit_payouts"), 0)
+
+        self.client.post(
+            f"/customers/{self.customer_id}/payouts",
+            data={"amount": "950", "method": "bKash", "note": "collecting"},
+        )
+        payout = self.one("SELECT * FROM credit_payouts")
+        self.assertEqual(payout["method"], "bKash")
+        self.assertAlmostEqual(payout["amount"], 950.00, places=2)
+        account = self.account()
+        self.assertAlmostEqual(account["credit"], 0.00, places=2, msg="full credit clears")
+        self.assertAlmostEqual(account["due"], 0.00, places=2)
+
+        # bKash leaves the till alone: the 3,000 from the bill is still there.
+        self.assertEqual(self.money_after(self.daily(), "Expected in drawer"), 3000.00)
+
+        statement = self.client.get(
+            f"/customers/{self.customer_id}/statement"
+            f"?from={self.today()}&to={self.today()}"
+        ).get_data(as_text=True)
+        self.assertIn(f"PAY-{payout['id']:05d}", statement)
+        self.assertIn("Credit payout", statement)
+
+    def test_cash_credit_payout_comes_out_of_the_drawer(self):
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 3000)
+        self.client.post(
+            f"/customers/{self.customer_id}/scrap", data={"black_kg": "5"}
+        )
+        self.client.post(
+            f"/customers/{self.customer_id}/payouts",
+            data={"amount": "400", "method": "Cash", "note": "part"},
+        )
+        payout = self.one("SELECT * FROM credit_payouts")
+
+        # 3,000 in on the bill, 400 handed back: the drawer holds 2,600.
+        self.assertEqual(self.money_after(self.daily(), "Expected in drawer"), 2600.00)
+        self.assertAlmostEqual(self.account()["credit"], 550.00, places=2)
+
+        page = self.client.get(f"/customers/{self.customer_id}").get_data(as_text=True)
+        self.assertIn("Credit paid out", page)
+        self.assertIn("Pay full credit", page)
+
+        slip = self.client.get(f"/credit-payouts/{payout['id']}/slip")
+        self.assertEqual(slip.status_code, 200)
+        html = slip.get_data(as_text=True)
+        self.assertIn("CUSTOMER COPY", html)
+        self.assertIn("SHOP COPY", html)
+        self.assertIn("400.00", html)
+        self.assertIn("Received by (customer)", html)
+
+    def test_void_credit_payout_needs_a_reason_and_restores_the_credit(self):
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 3000)
+        self.client.post(
+            f"/customers/{self.customer_id}/scrap", data={"black_kg": "5"}
+        )
+        self.client.post(
+            f"/customers/{self.customer_id}/payouts",
+            data={"amount": "950", "method": "Cash"},
+        )
+        self.assertAlmostEqual(self.account()["credit"], 0.00, places=2)
+        payout = self.one("SELECT * FROM credit_payouts")
+
+        # No reason, no void.
+        self.client.post(f"/credit-payouts/{payout['id']}/void", data={"reason": "  "})
+        self.assertIsNone(
+            self.one("SELECT voided_at FROM credit_payouts WHERE id = ?", (payout["id"],))[
+                "voided_at"
+            ],
+            "a void without a reason must be refused",
+        )
+
+        self.client.post(
+            f"/credit-payouts/{payout['id']}/void", data={"reason": "wrong customer"}
+        )
+        voided = self.one("SELECT * FROM credit_payouts WHERE id = ?", (payout["id"],))
+        self.assertIsNotNone(voided["voided_at"])
+        self.assertEqual(voided["void_reason"], "wrong customer")
+        self.assertAlmostEqual(voided["amount"], 950.00, places=2, msg="the row stays")
+        self.assertAlmostEqual(self.account()["credit"], 950.00, places=2)
+        # Its cash is back in the drawer: only the bill remains.
+        self.assertEqual(self.money_after(self.daily(), "Expected in drawer"), 3000.00)
+
+    # --- payment methods and the drawer ------------------------------------
+
+    def test_payment_methods_are_kept_apart_in_the_drawer(self):
+        figures = self.save(
+            [{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}],
+            1000,
+            payment_method="bKash",
+        ).get_json()
+        self.assertEqual(figures["payment_method"], "bKash")
+        self.assertEqual(
+            self.sale(figures["sale_id"])["payment_method"], "bKash"
+        )
+        self.client.post(
+            f"/customers/{self.customer_id}/payments",
+            data={"amount": "500", "method": "Bank"},
+        )
+
+        html = self.daily()
+        # Nothing reached the till: the drawer expects 0 and the other two
+        # methods carry the 1500.
+        self.assertEqual(self.money_after(html, "Expected in drawer"), 0.00)
+        self.assertIn("<td>bKash</td>", html)
+        self.assertIn("<td>Bank</td>", html)
+        self.assertEqual(self.money_after(html, "Cash collected"), 1500.00)
+
+    def test_day_close_snapshots_and_flags_a_later_void(self):
+        sale_id = self.save(
+            [{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 1000
+        ).get_json()["sale_id"]
+        day = self.today()
+
+        self.client.post(
+            "/daily/close",
+            data={"day": day, "counted_cash": "950", "note": "short 50"},
+        )
+        close = self.one("SELECT * FROM day_closes WHERE day = ?", (day,))
+        self.assertAlmostEqual(close["expected_cash"], 1000.00, places=2)
+        self.assertAlmostEqual(close["counted_cash"], 950.00, places=2)
+        self.assertAlmostEqual(close["cash_in"], 1000.00, places=2)
+        html = self.daily()
+        self.assertIn("Closed", html)
+        self.assertIn("is-short", html, "the short drawer must be marked")
+        self.assertNotIn("Changed since close", html)
+
+        self.client.post(f"/sales/{sale_id}/void", data={"reason": "wrong weight"})
+        html = self.daily()
+        self.assertIn("Changed since close", html, "a later void must flag the day")
+        # The snapshot is untouched: the close still remembers what was counted.
+        self.assertAlmostEqual(
+            self.one("SELECT counted_cash FROM day_closes WHERE day = ?", (day,))[
+                "counted_cash"
+            ],
+            950.00,
+            places=2,
+        )
+
+        self.client.post("/daily/reopen", data={"day": day})
+        self.assertIsNone(self.one("SELECT * FROM day_closes WHERE day = ?", (day,)))
+        self.assertNotIn("Changed since close", self.daily())
+
+    # --- receipts, ageing and statements -----------------------------------
+
+    def test_receipts_page_filters_by_customer_amount_and_status(self):
+        first = self.save(
+            [{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 1000
+        ).get_json()["sale_id"]
+        second = self.save(
+            [{"product_id": self.product["Smoke Pipe"], "weight_kg": 2}], 0
+        ).get_json()["sale_id"]
+        page = self.client.get(f"/receipts?q=Smoke+Customer&status=live")
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn(f"INV-{first:05d}", html)
+        self.assertIn(f"INV-{second:05d}", html)
+
+        # Amount filter: the pipe bill is 2 x 250.00.
+        by_amount = self.client.get("/receipts?amount=500").get_data(as_text=True)
+        self.assertIn(f"INV-{second:05d}", by_amount)
+        self.assertNotIn(f"INV-{first:05d}", by_amount)
+
+        self.client.post(f"/sales/{first}/void", data={"reason": "wrong weight"})
+        voided = self.client.get("/receipts?status=void").get_data(as_text=True)
+        self.assertIn(f"INV-{first:05d}", voided)
+        self.assertNotIn(f"INV-{second:05d}", voided)
+        # By invoice number, the way a customer quotes it.
+        self.assertIn(
+            f"INV-{first:05d}",
+            self.client.get(f"/receipts?q=INV-{first:05d}").get_data(as_text=True),
+        )
+
+    def test_due_ageing_splits_by_the_age_of_the_bill(self):
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 5}], 0)
+        old_id = self.scalar("SELECT id FROM sales")
+        with self.sql() as con:
+            con.execute(
+                "UPDATE sales SET created_at = datetime('now', 'localtime', '-90 days')"
+                " WHERE id = ?",
+                (old_id,),
+            )
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 1}], 0)
+        self.assertAlmostEqual(self.account()["due"], 1800.00, places=2)
+
+        html = self.client.get("/customers").get_data(as_text=True)
+        # The newest 300 is fresh; the 1500 behind it is over 60 days old.
+        self.assertIn("0–30 <b>300.00</b>", html)
+        self.assertIn("60+ <b>1,500.00</b>", html)
+
+    def test_statement_shows_bills_payments_scrap_and_closing_due(self):
+        sale_id = self.save(
+            [{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 1000
+        ).get_json()["sale_id"]
+        self.client.post(
+            f"/customers/{self.customer_id}/payments",
+            data={"amount": "500", "method": "Cash"},
+        )
+        self.client.post(
+            f"/customers/{self.customer_id}/scrap", data={"black_kg": "2"}
+        )
+        page = self.client.get(f"/customers/{self.customer_id}/statement")
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn("Account Statement", html)
+        self.assertIn(f"INV-{sale_id:05d}", html)
+        self.assertIn("PMT-", html)
+        self.assertIn("SCR-", html)
+        # 3000 billed - 1000 cash - 500 payment - 380 scrap = 1120.
+        self.assertIn("1,120.00", html)
+
+    # --- purchases and margin ----------------------------------------------
+
+    def test_purchases_carry_a_moving_average_cost_into_the_margin(self):
+        for cost in ("200", "300"):
+            bought = self.client.post(
+                "/purchases",
+                data={
+                    "supplier": "Smoke Supplier",
+                    "product_id": str(self.product["Smoke Sheet"]),
+                    "weight_kg": "10",
+                    "cost_per_kg": cost,
+                },
+            )
+            self.assertEqual(bought.status_code, 302)
+        self.assertAlmostEqual(
+            self.scalar(
+                "SELECT cost_per_kg FROM products WHERE id = ?",
+                (self.product["Smoke Sheet"],),
+            ),
+            250.00,
+            places=2,
+        )
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchases"), 2)
+
+        # 10 kg sold at 300 = 3000, cost 10 x 250 = 2500, margin 500.
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 10}], 3000)
+        html = self.daily()
+        self.assertEqual(self.money_after(html, "Cost of goods"), 2500.00)
+        self.assertEqual(self.money_after(html, "Gross margin"), 500.00)
+
+    def test_restore_refuses_a_file_that_is_not_a_backup(self):
+        self.save([{"product_id": self.product["Smoke Sheet"], "weight_kg": 2}], 0)
+        before = self.scalar("SELECT COUNT(*) FROM sales")
+
+        junk = self.client.post(
+            "/backup/restore",
+            data={"backup": (io.BytesIO(b"not a database"), "notes.db")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(junk.status_code, 302)
+        self.assertEqual(
+            self.scalar("SELECT COUNT(*) FROM sales"),
+            before,
+            "a junk file must never replace the database",
+        )
+        self.assertFalse(
+            (pathlib.Path(pos.DATA_DIR) / "restore-upload.db").exists(),
+            "the uploaded copy must always be cleaned up",
+        )
+
+        # A real snapshot goes back in, and the live database still works.
+        backup = pos.create_backup(force=True)
+        self.assertIsNotNone(backup)
+        with open(backup, "rb") as handle:
+            payload = handle.read()
+        restored = self.client.post(
+            "/backup/restore",
+            data={"backup": (io.BytesIO(payload), "shop_backup.db")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(restored.status_code, 302)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sales"), before)
+        self.assertEqual(
+            self.client.post("/api/sales", json={
+                "customer_id": self.customer_id,
+                "items": [{"product_id": self.product["Smoke Pipe"], "weight_kg": 1}],
+                "paid": 0,
+            }).status_code,
+            201,
+            "the restored database must accept a new bill",
+        )
+
+    def test_second_backup_folder_gets_a_copy(self):
+        second = pathlib.Path(pos.BACKUP_DIR).parent / "second-copy"
+        saved = self.client.post("/backup/second", data={"path": str(second)})
+        self.assertEqual(saved.status_code, 302)
+        self.assertEqual(pos.setting_value("backup_second_dir"), str(second))
+        self.client.post("/backup/now")
+        copies = list(second.glob("*.db"))
+        self.assertTrue(copies, "the new snapshot must be copied to the second folder")
+        self.assertTrue(
+            (pathlib.Path(pos.BACKUP_DIR) / copies[0].name).exists(),
+            "and still exist in the normal backups folder",
+        )
 
     # --- the real shop file ------------------------------------------------
 

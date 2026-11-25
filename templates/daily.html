@@ -50,6 +50,8 @@
       {% if totals.scrap > 0 %}
       <div><span>Scrap received</span><b>{{ CURRENCY }} {{ totals.scrap|money }}</b></div>
       {% endif %}
+      <div><span>Cost of goods</span><b>{{ CURRENCY }} {{ total_cost|money }}</b></div>
+      <div class="margin-line"><span>Gross margin</span><b>{{ CURRENCY }} {{ gross_margin|money }}</b></div>
     </div>
     <em class="daily-note">
       Cash collected is bills {{ CURRENCY }} {{ totals.cash_on_bills|money }}
@@ -73,6 +75,109 @@
   </div>
 </section>
 
+{% if cash_day %}
+<section class="card day-close no-print">
+  <div class="card-head">
+    <h3>Cash &amp; day close</h3>
+    <div class="close-status">
+      {% if close %}
+        <span class="tag tag-closed">Closed {{ close.closed_at[11:16] }}</span>
+        {% if close_changed %}
+          <span class="tag tag-warn" title="A bill, payment or void changed this day after it was closed">
+            Changed since close
+          </span>
+        {% endif %}
+      {% else %}
+        <span class="tag">Open</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="cash-grid">
+    <div class="cash-line">
+      <span>Cash in</span><b>{{ CURRENCY }} {{ cash_day.drawer_in|money }}</b>
+      <em>bills + due payments</em>
+    </div>
+    <div class="cash-line">
+      <span>Cash out</span><b class="is-out">- {{ CURRENCY }} {{ cash_day.drawer_out|money }}</b>
+      <em>scrap + credit paid out</em>
+    </div>
+    <div class="cash-line cash-line-strong">
+      <span>Expected in drawer</span><b>{{ CURRENCY }} {{ cash_day.expected|money }}</b>
+      <em>due added today {{ CURRENCY }} {{ cash_day.due_added|money }}</em>
+    </div>
+  </div>
+
+  <table class="data-table data-table-compact method-table">
+    <thead>
+      <tr>
+        <th>Payment method</th>
+        <th class="num">In</th>
+        <th class="num">Out</th>
+        <th class="num">Net</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for m in cash_day.rows %}
+      <tr class="{{ 'is-drawer' if loop.first }}">
+        <td>{{ m.name }}{% if loop.first %} <span class="small muted">· drawer</span>{% endif %}</td>
+        <td class="num">{{ m.cash_in|money }}</td>
+        <td class="num">{{ m.payouts|money }}</td>
+        <td class="num">{{ m.net|money }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if close %}
+  <div class="close-summary">
+    <div><span>Expected at close</span><b>{{ CURRENCY }} {{ close.expected_cash|money }}</b></div>
+    <div><span>Counted</span><b>{{ CURRENCY }} {{ close.counted_cash|money }}</b></div>
+    {% set gap = close.counted_cash - close.expected_cash %}
+    <div>
+      <span>Difference</span>
+      <b class="{{ 'is-short' if gap < 0 else 'is-over' if gap > 0 else '' }}">
+        {{ '-' if gap < 0 }}{{ CURRENCY }} {{ gap|abs|money }}
+      </b>
+    </div>
+    {% if close.note %}<p class="small muted close-note">{{ close.note }}</p>{% endif %}
+  </div>
+  {% endif %}
+
+  {% if close_changed %}
+  <p class="close-warning small">
+    Money for this day changed after it was closed — a bill, payment or void was
+    added, edited or reversed. Count the drawer again and update the close.
+  </p>
+  {% endif %}
+
+  <form class="close-form" method="post" action="{{ url_for('close_day') }}">
+    <input type="hidden" name="day" value="{{ start_iso }}">
+    <label>
+      Counted in drawer ({{ CURRENCY }})
+      <input class="input" type="number" name="counted_cash" step="0.01" min="0" required
+             value="{{ '%.2f'|format(close.counted_cash if close else cash_day.expected) }}">
+    </label>
+    <label>
+      Note (optional)
+      <input class="input" type="text" name="note" maxlength="200"
+             value="{{ close.note if close else '' }}"
+             placeholder="Short by 200, second count matched">
+    </label>
+    <button type="submit" class="btn btn-primary">
+      {{ 'Update close' if close else 'Close the day' }}
+    </button>
+  </form>
+
+  {% if close %}
+  <form method="post" action="{{ url_for('reopen_day') }}" class="reopen-form">
+    <input type="hidden" name="day" value="{{ start_iso }}">
+    <button type="submit" class="btn btn-small btn-ghost btn-danger">Reopen this day</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="card">
   <div class="card-head">
     <h3>Product sales — most to least sold</h3>
@@ -93,6 +198,8 @@
         <th>Product</th>
         <th class="num">Weight sold (kg)</th>
         <th class="num">Revenue ({{ CURRENCY }})</th>
+        <th class="num no-print">Cost ({{ CURRENCY }})</th>
+        <th class="num no-print">Margin ({{ CURRENCY }})</th>
       </tr>
     </thead>
     <tbody>
@@ -102,6 +209,8 @@
         <td class="link-strong">{{ p.product_name }}</td>
         <td class="num">{{ '%.3f'|format(p.weight) }}</td>
         <td class="num">{{ p.revenue|money }}</td>
+        <td class="num no-print muted">{{ p.cost|money }}</td>
+        <td class="num no-print">{{ p.margin|money }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -110,6 +219,8 @@
         <td colspan="2">Total — {{ products|length }} product{{ '' if products|length == 1 else 's' }}</td>
         <td class="num">{{ '%.3f'|format(total_weight) }}</td>
         <td class="num">{{ totals.sales|money }}</td>
+        <td class="num no-print">{{ total_cost|money }}</td>
+        <td class="num no-print">{{ gross_margin|money }}</td>
       </tr>
     </tfoot>
   </table>

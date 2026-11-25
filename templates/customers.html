@@ -75,6 +75,7 @@
           <th>Phone</th>
           <th>Shop / Address</th>
           <th class="num">Current Due</th>
+          <th class="num" title="Due split by how old the bills behind it are">Ageing ({{ CURRENCY }})</th>
           <th></th>
         </tr>
       </thead>
@@ -93,6 +94,18 @@
               <span class="credit-amount">Credit {{ CURRENCY }} {{ c.credit|money }}</span>
             {% else %}
               {{ CURRENCY }} {{ c.balance|money }}
+            {% endif %}
+          </td>
+          <td class="age-cell">
+            {% set age = ages.get(c.id) %}
+            {% if age and c.balance > 0 %}
+              <div class="age-pills">
+                <span class="age-pill">0–30 <b>{{ age['0–30']|money }}</b></span>
+                <span class="age-pill {{ 'is-mid' if age['31–60'] > 0 }}">31–60 <b>{{ age['31–60']|money }}</b></span>
+                <span class="age-pill {{ 'is-old' if age['60+'] > 0 }}">60+ <b>{{ age['60+']|money }}</b></span>
+              </div>
+            {% else %}
+              <span class="muted small">—</span>
             {% endif %}
           </td>
           <td class="actions">

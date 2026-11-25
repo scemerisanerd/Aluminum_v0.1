@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Backups &amp; Restore{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <h2>Backups &amp; Restore</h2>
+    <p class="muted">A snapshot is written every hour and whenever money changes, as long as the app is running.</p>
+  </div>
+  <div class="stat-chip"><span>{{ total_backups }}</span> snapshot{{ '' if total_backups == 1 else 's' }} kept</div>
+</section>
+
+<div class="layout-split">
+  <div class="stack">
+    <section class="card">
+      <div class="card-head">
+        <h3>Saved snapshots</h3>
+        <form method="post" action="{{ url_for('backup_now') }}">
+          <button type="submit" class="btn btn-small btn-primary">Back up now</button>
+        </form>
+      </div>
+      {% if backups %}
+      <table class="data-table data-table-compact">
+        <thead>
+          <tr><th>File</th><th>Written</th><th class="num">Size</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for b in backups %}
+          <tr>
+            <td class="small"><code>{{ b.name }}</code></td>
+            <td class="small muted">{{ b.when.strftime('%d %b %Y, %H:%M') }}</td>
+            <td class="num small muted">{{ '%.0f'|format(b.size / 1024) }} KB</td>
+            <td class="actions">
+              <a class="btn btn-small btn-ghost" href="{{ url_for('download_backup_file', name=b.name) }}">Download</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+        <p class="empty">No snapshots yet. Press “Back up now” to write the first one.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h3>Restore from a backup</h3>
+      <p class="small muted">
+        The live database is copied into <code>backups/</code> first, then replaced with the file you
+        choose. The file is checked with SQLite's own integrity check and for the shop tables before
+        anything is touched, so a wrong file changes nothing.
+      </p>
+      <form method="post" action="{{ url_for('restore_backup') }}" enctype="multipart/form-data" class="stack"
+            onsubmit="return confirm('Replace the live database with this file? The current one is saved in backups/ first.');">
+        <label>
+          Backup file (.db)
+          <input class="input" type="file" name="backup" accept=".db,.sqlite,.sqlite3" required>
+        </label>
+        <button type="submit" class="btn btn-primary">Restore this backup</button>
+      </form>
+    </section>
+  </div>
+
+  <aside class="stack">
+    <section class="card card-side">
+      <h3>Second copy folder</h3>
+      <p class="small muted">
+        Every new snapshot is also copied here. Point it at a USB drive or a synced folder so a dead
+        hard drive is not the end of the ledger.
+      </p>
+      <form method="post" action="{{ url_for('save_backup_second') }}" class="stack">
+        <label>
+          Folder path
+          <input class="input" type="text" name="path" value="{{ second_dir }}"
+                 placeholder="D:\POS Backups" autocomplete="off">
+        </label>
+        <button type="submit" class="btn btn-primary btn-full">Save folder</button>
+      </form>
+      <div class="divider"></div>
+      {% if second_dir %}
+        <p class="small muted">Copying to <code>{{ second_dir }}</code>.</p>
+      {% else %}
+        <p class="small muted">No second folder yet — snapshots live only on this PC's disk.</p>
+      {% endif %}
+    </section>
+
+    <section class="card card-side">
+      <h3>This database</h3>
+      <p class="small"><code>{{ db_path }}</code></p>
+      <p class="small muted">{{ '%.0f'|format(db_size / 1024) }} KB on disk.</p>
+      <a class="btn btn-full" href="{{ url_for('download_backup') }}">Download a fresh copy</a>
+    </section>
+  </aside>
+</div>
+{% endblock %}

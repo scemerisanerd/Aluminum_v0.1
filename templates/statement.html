@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/statement.css') }}">
+{% endblock %}
+{% block body_class %}statement-page{% endblock %}
+{% block title %}Statement — {{ customer.name }}{% endblock %}
+
+{% block content %}
+<div class="statement-toolbar no-print">
+  <form class="date-form" method="get" action="{{ url_for('customer_statement', customer_id=customer.id) }}">
+    <label for="statement-from">From
+      <input type="date" id="statement-from" name="from" value="{{ start_iso }}">
+    </label>
+    <label for="statement-to">To
+      <input type="date" id="statement-to" name="to" value="{{ end_iso }}">
+    </label>
+    <button type="submit" class="btn btn-small">Show</button>
+    <button type="button" class="btn btn-primary" onclick="window.print()">Print statement</button>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('customer_detail', customer_id=customer.id) }}">Back to ledger</a>
+  </form>
+</div>
+
+<article class="statement-sheet">
+  <header class="statement-head">
+    <div>
+      <h1>{{ SHOP.name }}</h1>
+      <p>{{ SHOP.tagline }} • {{ SHOP.address }}</p>
+      <p>{{ SHOP.phone }}</p>
+    </div>
+    <div class="statement-title">
+      <h2>Account Statement</h2>
+      <p>{{ start_iso }} — {{ end_iso }}</p>
+    </div>
+  </header>
+
+  <section class="statement-parties">
+    <div>
+      <span class="statement-label">Customer</span>
+      <strong>{{ customer.name }}</strong>
+      {% if customer.shop_name %}<p>{{ customer.shop_name }}</p>{% endif %}
+      {% if customer.phone %}<p>{{ customer.phone }}</p>{% endif %}
+      {% if customer.address %}<p>{{ customer.address }}</p>{% endif %}
+    </div>
+    <div>
+      <span class="statement-label">Balance</span>
+      <strong>{{ CURRENCY }} {{ closing|money }}</strong>
+      <p>{{ 'Due' if closing > 0 else 'Credit' if closing < 0 else 'Settled' }} at {{ end_iso }}</p>
+    </div>
+  </section>
+
+  <table class="statement-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Entry</th>
+        <th>Details</th>
+        <th class="num">Bill ({{ CURRENCY }})</th>
+        <th class="num">Received ({{ CURRENCY }})</th>
+        <th class="num">Balance ({{ CURRENCY }})</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="statement-opening">
+        <td>{{ start_iso }}</td>
+        <td colspan="3">Opening balance</td>
+        <td class="num"></td>
+        <td class="num">{{ opening|money }}</td>
+      </tr>
+      {% for line in lines %}
+      <tr>
+        <td>{{ line.when[:10] }}</td>
+        <td>{{ line.ref }} <span class="statement-kind">{{ line.kind }}</span></td>
+        <td class="statement-note">{{ line.note }}</td>
+        <td class="num">{{ line.billed|money if line.billed else '' }}</td>
+        <td class="num">{{ line.received|money if line.received else '' }}</td>
+        <td class="num">{{ line.balance|money }}</td>
+      </tr>
+      {% endfor %}
+      {% if not lines %}
+      <tr>
+        <td colspan="6" class="statement-empty">No bills or payments in this period.</td>
+      </tr>
+      {% endif %}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="3">Billed and received in this period</td>
+        <td class="num">{{ billed|money }}</td>
+        <td class="num">{{ received|money }}</td>
+        <td class="num">{{ closing|money }}</td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <footer class="statement-foot">
+    <p>Closing balance: <b>{{ CURRENCY }} {{ closing|money }}</b>{% if closing < 0 %} (credit on account){% endif %}.</p>
+    {% if voided %}
+    <p>{{ voided }} voided receipt{{ '' if voided == 1 else 's' }} excluded from this statement.</p>
+    {% endif %}
+    <p>Printed {{ printed_at }}. Bills are payable on receipt; bring this statement with any query.</p>
+  </footer>
+</article>
+{% endblock %}

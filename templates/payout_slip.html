@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ slip_no }} — Credit payout — {{ SHOP.name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/receipt.css') }}">
+</head>
+<body class="receipt-page">
+
+  {% macro slip_body(copy_label, show_signature) %}
+  <section class="receipt-copy">
+    <div class="copy-banner">{{ copy_label }}</div>
+
+    {% if payout.voided_at %}
+    <div class="void-banner">
+      ** VOID ** {{ payout.voided_at }}<br>{{ payout.void_reason }}
+    </div>
+    {% endif %}
+
+    <header class="receipt-header">
+      <img class="receipt-logo" src="{{ url_for('static', filename='img/logo.webp') }}" alt="{{ SHOP.name }} logo">
+      <h1>{{ SHOP.name }}</h1>
+      <p>{{ SHOP.tagline }}</p>
+      <p>{{ SHOP.address }}</p>
+      <p>Phone: {{ SHOP.phone }}</p>
+    </header>
+
+    <div class="receipt-rule"></div>
+
+    <p class="receipt-note" style="font-weight:700; letter-spacing:.06em;">CREDIT PAYOUT RECEIPT</p>
+
+    <div class="receipt-meta">
+      <div><span>Slip</span><b>{{ slip_no }}</b></div>
+      <div><span>Date</span><b>{{ payout.created_at }}</b></div>
+      <div><span>Customer</span><b>{{ customer.name }}</b></div>
+      <div><span>Shop</span><b>{{ customer.shop_name or '—' }}</b></div>
+      <div><span>Phone</span><b>{{ customer.phone or '—' }}</b></div>
+    </div>
+
+    <div class="receipt-rule"></div>
+
+    <div class="payout-amount">
+      <span>Credit paid out</span>
+      <b>{{ CURRENCY }} {{ payout.amount|money }}</b>
+    </div>
+
+    <table class="receipt-totals">
+      <tr>
+        <td>Paid by</td>
+        <td class="num">{{ payout.method }}</td>
+      </tr>
+      <tr>
+        <td>Credit left on account</td>
+        <td class="num">{{ CURRENCY }} {{ credit_left|money }}</td>
+      </tr>
+    </table>
+
+    {% if payout.note %}
+    <div class="receipt-rule"></div>
+    <p class="receipt-note">Note: {{ payout.note }}</p>
+    {% endif %}
+
+    <div class="receipt-rule"></div>
+
+    <p class="receipt-note">
+      This slip settles credit on the account. No goods were sold with it.
+    </p>
+
+    {% if show_signature %}
+    <div class="sign-line">Received by (customer): _____________________</div>
+    <div class="sign-line">Paid by (shop): _____________________</div>
+    {% endif %}
+
+    <p class="receipt-foot">Please keep this slip for your records.</p>
+  </section>
+  {% endmacro %}
+
+  <div class="receipt-toolbar no-print">
+    <a class="btn" href="{{ url_for('customer_detail', customer_id=customer.id) }}">← Customer ledger</a>
+    <button class="btn btn-primary" onclick="window.print()">Print payout slip</button>
+  </div>
+
+  <div class="receipt-sheet">
+    {{ slip_body('*** CUSTOMER COPY ***', False) }}
+    <div class="tear-line" aria-hidden="true">- - - - - - - - - - - - - - - -</div>
+    {{ slip_body('*** SHOP COPY ***', True) }}
+  </div>
+
+  {% if autoprint %}
+  <script>
+    window.addEventListener('load', function () {
+      setTimeout(function () { window.print(); }, 250);
+    });
+  </script>
+  {% endif %}
+</body>
+</html>
