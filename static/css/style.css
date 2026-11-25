@@ -372,6 +372,13 @@ kbd {
   color: var(--warn);
 }
 .remainder-row b { color: var(--warn); }
+/* Change to return: green, tabular, and only on screen when there is any. */
+.change-row {
+  background: var(--ok-soft); border: 1px solid var(--ok-line);
+  border-radius: var(--radius-sm); padding: 10px 12px; margin-top: 6px;
+  color: #065f46; font-weight: 600;
+}
+.change-row b { color: #065f46; font-size: 17px; }
 .roundoff-box {
   margin: 12px 0; padding: 14px; border-radius: var(--radius);
   border: 1px dashed var(--line); background: #fbfdff;
@@ -939,9 +946,10 @@ kbd {
 }
 
 /* ------------------------------------------------------------------
-   Customer ledger actions: one card, three tabs
-   Record Payment / Scrap Against Due / Previous Due. The radios drive
-   the panels with :has(), so switching tabs needs no JavaScript.
+   Customer ledger actions: one card, four tabs
+   Record Payment / Scrap Against Due / Previous Due / Pay Out Credit.
+   The radios drive the panels with :has(), so switching tabs needs no
+   JavaScript.
    ------------------------------------------------------------------ */
 .ledger-actions { padding: 18px 18px 16px; }
 .ledger-actions .card-head { margin-bottom: 12px; align-items: baseline; }
@@ -954,8 +962,10 @@ kbd {
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 
+/* Four actions sit as two even rows: in a sidebar every pill keeps a full
+   label on one line instead of shrinking to an ellipsis. */
 .action-tab-bar {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 2px; padding: 3px; margin-bottom: 14px;
   background: #f1f3f6; border: 1px solid var(--line); border-radius: 999px;
 }
@@ -973,7 +983,8 @@ kbd {
 .action-tab-bar label:active { transform: scale(.97); }
 .action-tabs:has(#action-payment:checked) label[for="action-payment"],
 .action-tabs:has(#action-scrap:checked) label[for="action-scrap"],
-.action-tabs:has(#action-due:checked) label[for="action-due"] {
+.action-tabs:has(#action-due:checked) label[for="action-due"],
+.action-tabs:has(#action-payout:checked) label[for="action-payout"] {
   background: #fff; color: var(--ink);
   box-shadow: 0 1px 2px rgba(17, 24, 39, .12);
 }
@@ -984,7 +995,18 @@ kbd {
 .action-panel { display: none; }
 .action-tabs:has(#action-payment:checked) #panel-payment,
 .action-tabs:has(#action-scrap:checked) #panel-scrap,
-.action-tabs:has(#action-due:checked) #panel-due { display: block; }
+.action-tabs:has(#action-due:checked) #panel-due,
+.action-tabs:has(#action-payout:checked) #panel-payout {
+  display: block; animation: action-panel-in 160ms var(--ease-out);
+}
+/* A 3px lift rather than a slide: the panel should read as already there. */
+@keyframes action-panel-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .action-panel { animation: none !important; }
+}
 
 /* Tight fields, so three small actions never stretch into a column of air. */
 .action-form { display: grid; gap: 10px; margin: 0; }
@@ -996,6 +1018,9 @@ kbd {
 .action-form .segmented span { padding: 6px 11px; }
 
 .action-hint { margin: 0; font-size: 11.5px; line-height: 1.4; color: var(--ink-soft); }
+
+/* The 80mm slip offer after a payout sits under the panel, not in it. */
+.slip-link { margin: 10px 0 0; }
 
 /* The live figure belongs to the button: one attached strip, not floating text. */
 .live-summary {

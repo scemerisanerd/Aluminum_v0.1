@@ -233,6 +233,10 @@
         Amount paid today ({{ CURRENCY }})
         <input class="input input-lg" type="number" id="paid" step="0.01" min="0" value="0.00">
       </label>
+      <div class="total-row change-row" id="change-row" hidden>
+        <span>Change to return</span>
+        <b id="change-return">{{ CURRENCY }} 0.00</b>
+      </div>
       <fieldset class="segmented" id="payment-method" aria-label="How the payment arrived">
         {% for name in ['Cash', 'bKash', 'Bank'] %}
         <label><input type="radio" name="payment_method" value="{{ name }}" {{ 'checked' if loop.first }}><span>{{ name }}</span></label>
@@ -266,7 +270,6 @@
         <span>New remaining due</span>
         <b id="new-due">{{ CURRENCY }} 0.00</b>
       </div>
-      <p class="small muted center" id="change-note" hidden></p>
     </div>
 
     <button type="button" class="btn btn-primary btn-full btn-print" id="save-print">

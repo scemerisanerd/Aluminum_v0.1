@@ -420,13 +420,15 @@
     </div>
 
     <div class="action-tabs">
-      <input type="radio" name="ledger-action" id="action-payment" checked>
+      <input type="radio" name="ledger-action" id="action-payment" {{ 'checked' if not request.args.get('slip') }}>
       <input type="radio" name="ledger-action" id="action-scrap">
       <input type="radio" name="ledger-action" id="action-due">
+      <input type="radio" name="ledger-action" id="action-payout" {{ 'checked' if request.args.get('slip') }}>
       <div class="action-tab-bar" aria-label="Customer ledger action">
         <label for="action-payment">Record Payment</label>
         <label for="action-scrap">Scrap Against Due</label>
         <label for="action-due">Previous Due</label>
+        <label for="action-payout">Pay Out Credit</label>
       </div>
 
       <div class="action-panel" id="panel-payment">
@@ -593,74 +595,82 @@
           })();
         </script>
       </div>
+
+      <div class="action-panel" id="panel-payout">
+        {% if credit > 0 %}
+        <form method="post" action="{{ url_for('record_credit_payout', customer_id=customer.id) }}" class="action-form">
+          <label>
+            Payout amount ({{ CURRENCY }})
+            <input class="input input-lg" type="number" name="amount" id="payout-amount"
+                   step="0.01" min="0.01" max="{{ '%.2f'|format(credit) }}"
+                   placeholder="{{ '%.2f'|format(credit) }}" required>
+          </label>
+          <button type="button" class="btn btn-small btn-ghost btn-full" id="pay-full-credit">
+            Use full credit · {{ CURRENCY }} {{ credit|money }}
+          </button>
+          <fieldset class="segmented" aria-label="How the credit is paid out">
+            {% for name in ['Cash', 'bKash', 'Bank'] %}
+            <label><input type="radio" name="method" value="{{ name }}" {{ 'checked' if loop.first }}><span>{{ name }}</span></label>
+            {% endfor %}
+          </fieldset>
+          <label>
+            Note (optional)
+            <input class="input" type="text" name="note" placeholder="Handed back in cash">
+          </label>
+          <div class="live-summary live-summary-stacked">
+            <div>
+              <span>Credit on account</span>
+              <b>{{ CURRENCY }} {{ credit|money }}</b>
+            </div>
+            <div>
+              <span>Balance after payout</span>
+              <b id="after-payout">{{ CURRENCY }} {{ credit|money }}</b>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">Pay out credit</button>
+        </form>
+        <script>
+          (function () {
+            var input = document.getElementById('payout-amount');
+            var out = document.getElementById('after-payout');
+            var full = document.getElementById('pay-full-credit');
+            var current = {{ credit|float }};
+            var currency = {{ CURRENCY|tojson }};
+            function fmt(n) {
+              return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            }
+            function recalc() {
+              var v = parseFloat(input.value);
+              if (isNaN(v) || v < 0) { v = 0; }
+              var left = Math.round((current - v) * 100) / 100;
+              out.textContent = left < 0
+                ? 'over the credit — enter up to ' + currency + ' ' + fmt(current)
+                : currency + ' ' + fmt(left);
+            }
+            full.addEventListener('click', function () {
+              input.value = current.toFixed(2);
+              input.focus();
+              recalc();
+            });
+            input.addEventListener('input', recalc);
+            recalc();
+          })();
+        </script>
+        {% else %}
+        <p class="action-hint">
+          No credit on this account right now. Credit appears here after a scrap entry
+          or an overpaid bill, and can then be handed back in cash.
+        </p>
+        {% endif %}
+        {% if request.args.get('slip') %}
+        <p class="slip-link">
+          <a class="btn btn-small btn-full" target="_blank"
+             href="{{ url_for('payout_slip', payout_id=request.args.get('slip')) }}">Print payout slip (80mm)</a>
+        </p>
+        {% endif %}
+      </div>
     </div>
   </section>
-
-  {% if credit > 0 %}
-  <section class="card card-side" id="pay-out-credit">
-    <h3>Pay out credit</h3>
-    <p class="small muted">
-      Hand back the {{ CURRENCY }} {{ credit|money }} credit on this account — no goods,
-      no bill. Paying the full credit leaves the balance at zero.
-    </p>
-    <form method="post" action="{{ url_for('record_credit_payout', customer_id=customer.id) }}" class="stack">
-      <label>
-        Payout amount ({{ CURRENCY }})
-        <input class="input input-lg" type="number" name="amount" id="payout-amount"
-               step="0.01" min="0.01" max="{{ '%.2f'|format(credit) }}"
-               placeholder="{{ '%.2f'|format(credit) }}" required>
-      </label>
-      <button type="button" class="btn btn-small btn-ghost btn-full" id="pay-full-credit">
-        Pay full credit · {{ CURRENCY }} {{ credit|money }}
-      </button>
-      <fieldset class="segmented" aria-label="How the credit is paid out">
-        {% for name in ['Cash', 'bKash', 'Bank'] %}
-        <label><input type="radio" name="method" value="{{ name }}" {{ 'checked' if loop.first }}><span>{{ name }}</span></label>
-        {% endfor %}
-      </fieldset>
-      <label>
-        Note (optional)
-        <input class="input" type="text" name="note" placeholder="Collecting credit in cash">
-      </label>
-      <button type="submit" class="btn btn-primary btn-full">Pay out credit</button>
-    </form>
-    <div class="divider"></div>
-    <p class="small muted">Credit left after payout: <b id="after-payout">{{ CURRENCY }} {{ credit|money }}</b></p>
-    {% if request.args.get('slip') %}
-    <p class="small">
-      <a class="btn btn-small btn-full" target="_blank"
-         href="{{ url_for('payout_slip', payout_id=request.args.get('slip')) }}">Print payout slip (80mm)</a>
-    </p>
-    {% endif %}
-    <script>
-      (function () {
-        var input = document.getElementById('payout-amount');
-        var out = document.getElementById('after-payout');
-        var full = document.getElementById('pay-full-credit');
-        var current = {{ credit|float }};
-        var currency = {{ CURRENCY|tojson }};
-        function fmt(n) {
-          return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-        }
-        function recalc() {
-          var v = parseFloat(input.value);
-          if (isNaN(v) || v < 0) { v = 0; }
-          var left = Math.round((current - v) * 100) / 100;
-          out.textContent = left < 0
-            ? 'over the credit — enter up to ' + currency + ' ' + fmt(current)
-            : currency + ' ' + fmt(left);
-        }
-        full.addEventListener('click', function () {
-          input.value = current.toFixed(2);
-          input.focus();
-          recalc();
-        });
-        input.addEventListener('input', recalc);
-        recalc();
-      })();
-    </script>
-  </section>
-  {% endif %}
 
   <section class="card card-side">
     <h3>Special product rates</h3>

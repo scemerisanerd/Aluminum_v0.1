@@ -896,7 +896,7 @@ class SmokeTest(unittest.TestCase):
 
         page = self.client.get(f"/customers/{self.customer_id}").get_data(as_text=True)
         self.assertIn("Credit paid out", page)
-        self.assertIn("Pay full credit", page)
+        self.assertIn("Use full credit", page)
 
         slip = self.client.get(f"/credit-payouts/{payout['id']}/slip")
         self.assertEqual(slip.status_code, 200)

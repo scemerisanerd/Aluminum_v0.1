@@ -116,10 +116,17 @@
         <td class="num">+ {{ CURRENCY }} {{ scrap_credit|money }}</td>
       </tr>
       {% endif %}
+      {% if change_display > 0 %}
+      <tr>
+        <td>Paid</td>
+        <td class="num">{{ CURRENCY }} {{ sale.paid|money }}</td>
+      </tr>
+      {% else %}
       <tr>
         <td>Amount paid today (cash)</td>
         <td class="num">{{ CURRENCY }} {{ cash_applied|money }}</td>
       </tr>
+      {% endif %}
       {% if round_off > 0 %}
       <tr>
         <td>Round-off / Adj.</td>

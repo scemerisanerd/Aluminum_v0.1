@@ -44,7 +44,8 @@
     waiveThreshold: document.getElementById("waive-threshold"),
     waiveHint: document.getElementById("waive-hint"),
     newDue: document.getElementById("new-due"),
-    changeNote: document.getElementById("change-note"),
+    changeRow: document.getElementById("change-row"),
+    changeReturn: document.getElementById("change-return"),
     scrapBlack: document.getElementById("scrap-black"),
     scrapWhite: document.getElementById("scrap-white"),
     scrapRateBlack: document.getElementById("scrap-rate-black"),
@@ -419,11 +420,11 @@
       }
     }
 
-    if (el.changeNote) {
-      el.changeNote.hidden = change <= 0;
-      el.changeNote.textContent = change > 0
-        ? "Change returned: " + CURRENCY + " " + money(change)
-        : "";
+    // Cash handed over beyond the settlement target goes straight back to the
+    // customer: it never becomes credit and never makes the due negative.
+    if (el.changeRow) {
+      el.changeRow.hidden = change <= 0;
+      el.changeReturn.textContent = CURRENCY + " " + money(change);
     }
 
     if (el.headDue) {
